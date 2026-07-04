@@ -1,0 +1,31 @@
+version: '3.9'
+
+# UrbanPulse docker-compose
+#
+# Supabase is hosted (cloud), so we do NOT run a local Postgres container.
+# This compose file exists purely to run the Node/Express backend in a
+# container with the correct environment variables.
+#
+# Usage:
+#   1. Copy backend/.env.example → backend/.env and fill in your values.
+#   2. docker compose up --build
+
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: urbanpulse-api
+    ports:
+      - '3001:3001'
+    env_file:
+      - ./backend/.env
+    environment:
+      NODE_ENV: production
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3001/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
