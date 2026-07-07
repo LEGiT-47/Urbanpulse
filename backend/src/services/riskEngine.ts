@@ -17,6 +17,7 @@ interface Weights {
   traffic: number;
   aqi: number;
   water_level: number;
+  event?: number;
 }
 
 let weights: Weights = { ...weightsConfig };
@@ -55,6 +56,10 @@ function normalizeValue(type: string, val: number): number {
       // water level is 0-100 cm
       norm = val;
       break;
+    case 'event':
+      // normalize footfall. Capped at 50,000 for maximum risk impact.
+      norm = (val / 50000) * 100;
+      break;
     default:
       norm = val;
   }
@@ -89,6 +94,14 @@ function generateExplanation(zoneName: string, factors: Record<string, number>):
     elevatedFactors.push('elevated air quality index');
   }
 
+  if (factors.event && factors.event > 0) {
+    if (factors.event > 50000) {
+      elevatedFactors.push(`large public event (${factors.event.toLocaleString()} expected footfall)`);
+    } else {
+      elevatedFactors.push(`active public event (${factors.event.toLocaleString()} expected footfall)`);
+    }
+  }
+
   if (elevatedFactors.length === 0) {
     return `Normal conditions monitored in ${zoneName}.`;
   }
@@ -109,6 +122,106 @@ function generateExplanation(zoneName: string, factors: Record<string, number>):
   return `${capitalized} impacting ${zoneName} concurrently.`;
 }
 
+// AI recommendation rule engine keyed to factor combinations
+function getAIRecommendations(zoneName: string, factors: Record<string, number>): Array<{ text: string; priority: 'high' | 'medium' | 'low'; trigger: string }> {
+  const recs: Array<{ text: string; priority: 'high' | 'medium' | 'low'; trigger: string }> = [];
+
+  // Rainfall
+  if (factors.rainfall > 35) {
+    recs.push({
+      text: `Pre-position emergency water pumps at waterlogging hotspots in ${zoneName}.`,
+      priority: 'high',
+      trigger: 'heavy rainfall'
+    });
+  } else if (factors.rainfall > 15) {
+    recs.push({
+      text: `Monitor drainage inlets for potential blockage in ${zoneName}.`,
+      priority: 'medium',
+      trigger: 'rising rainfall'
+    });
+  }
+
+  // Water Level
+  if (factors.water_level > 50) {
+    recs.push({
+      text: `Close flood-prone underpasses and deploy water rescue teams in ${zoneName}.`,
+      priority: 'high',
+      trigger: 'critical flooding'
+    });
+  } else if (factors.water_level > 20) {
+    recs.push({
+      text: `Alert emergency response teams of rising flood risks in ${zoneName}.`,
+      priority: 'high',
+      trigger: 'rising water levels'
+    });
+  }
+
+  // Traffic
+  if (factors.traffic > 75) {
+    recs.push({
+      text: `Activate dynamic signal coordination and deploy traffic marshals to relieve gridlock in ${zoneName}.`,
+      priority: 'high',
+      trigger: 'severe traffic gridlock'
+    });
+  } else if (factors.traffic > 40) {
+    recs.push({
+      text: `Advise commuters to use alternative arterial roads in ${zoneName} to bypass congestion.`,
+      priority: 'medium',
+      trigger: 'elevated traffic congestion'
+    });
+  }
+
+  // AQI
+  if (factors.aqi > 200) {
+    recs.push({
+      text: `Restrict local industrial emissions and advise residents in ${zoneName} to wear N95 masks outdoors.`,
+      priority: 'high',
+      trigger: 'hazardous air pollution'
+    });
+  } else if (factors.aqi > 100) {
+    recs.push({
+      text: `Recommend sensitive groups in ${zoneName} avoid prolonged outdoor exposure.`,
+      priority: 'medium',
+      trigger: 'elevated air quality index'
+    });
+  }
+
+  // Active Event
+  if (factors.event && factors.event > 0) {
+    if (factors.event > 50000) {
+      recs.push({
+        text: `Activate major event crowd dispersal protocols at transit nodes in ${zoneName}.`,
+        priority: 'high',
+        trigger: 'large public event'
+      });
+    } else {
+      recs.push({
+        text: `Deploy crowd control teams at local transit stations in ${zoneName}.`,
+        priority: 'medium',
+        trigger: 'active public event'
+      });
+    }
+
+    // Compounding (Convergence) Rules
+    if (factors.traffic > 50) {
+      recs.push({
+        text: `Divert transit and general traffic away from event venue routes in ${zoneName}.`,
+        priority: 'high',
+        trigger: 'compounding event + traffic'
+      });
+    }
+    if (factors.water_level > 30) {
+      recs.push({
+        text: `Waterlogging detected near event venue: coordinate evacuation assembly points with event staff in ${zoneName}.`,
+        priority: 'high',
+        trigger: 'compounding event + flooding'
+      });
+    }
+  }
+
+  return recs.slice(0, 3); // limit to 1-3 recommendations
+}
+
 /**
  * Evaluates the risk score for all unique zones in Mumbai,
  * maps scores to categories, generates explanations, and saves snapshots in Supabase.
@@ -126,7 +239,31 @@ export async function evaluateZoneRisks(): Promise<void> {
     return;
   }
 
-  // 2. Fetch the latest reading for each sensor in parallel
+  // 2. Fetch active events
+  let activeEvents: any[] = [];
+  try {
+    const nowStr = new Date().toISOString();
+    const { data, error } = await supabase
+      .from('events')
+      .select('*')
+      .lte('start_time', nowStr)
+      .gte('end_time', nowStr);
+    if (!error && data) {
+      activeEvents = data;
+    }
+  } catch (e: any) {
+    console.warn('[RiskEngine] Failed to load active events for evaluation:', e.message);
+  }
+
+  const activeEventsByZone: Record<string, any[]> = {};
+  activeEvents.forEach((event) => {
+    if (!activeEventsByZone[event.zone_name]) {
+      activeEventsByZone[event.zone_name] = [];
+    }
+    activeEventsByZone[event.zone_name].push(event);
+  });
+
+  // 3. Fetch the latest reading for each sensor in parallel
   const latestReadings: Record<string, number> = {};
   await Promise.all(
     (sensors as Sensor[]).map(async (sensor) => {
@@ -143,7 +280,7 @@ export async function evaluateZoneRisks(): Promise<void> {
     })
   );
 
-  // 3. Group sensors by zone
+  // 4. Group sensors by zone
   const zones: Record<string, Sensor[]> = {};
   sensors.forEach((sensor: Sensor) => {
     if (!zones[sensor.zone_name]) {
@@ -155,7 +292,7 @@ export async function evaluateZoneRisks(): Promise<void> {
   const now = new Date().toISOString();
   const snapshotsToInsert: any[] = [];
 
-  // 4. Calculate risk score for each zone
+  // 5. Calculate risk score for each zone
   for (const [zoneName, zoneSensors] of Object.entries(zones)) {
     let weightedSum = 0;
     let sumOfWeights = 0;
@@ -173,7 +310,19 @@ export async function evaluateZoneRisks(): Promise<void> {
       }
     });
 
-    // If we have readings in this zone, compute weighted score. Else score is 0.
+    // Fold active events expected footfall as an additional factor
+    const zoneEvents = activeEventsByZone[zoneName] || [];
+    const totalFootfall = zoneEvents.reduce((sum, e) => sum + e.expected_footfall, 0);
+    if (totalFootfall > 0) {
+      factors['event'] = totalFootfall;
+      const normVal = normalizeValue('event', totalFootfall);
+      const weight = weights['event'] || 0.20;
+
+      weightedSum += weight * normVal;
+      sumOfWeights += weight;
+    }
+
+    // If we have readings or active events in this zone, compute weighted score. Else score is 0.
     const score = sumOfWeights > 0 
       ? Math.round((weightedSum / sumOfWeights) * 100) / 100 
       : 0;
@@ -189,6 +338,7 @@ export async function evaluateZoneRisks(): Promise<void> {
     }
 
     const explanation = generateExplanation(zoneName, factors);
+    const recommendations = getAIRecommendations(zoneName, factors);
 
     snapshotsToInsert.push({
       zone_name: zoneName,
@@ -196,7 +346,8 @@ export async function evaluateZoneRisks(): Promise<void> {
       category,
       factors: {
         ...factors,
-        explanation // Store the human explanation inside the factors JSONB object as requested
+        explanation, // Store the human explanation inside the factors JSONB object
+        recommendations // Store the recommendations list
       },
       created_at: now
     });

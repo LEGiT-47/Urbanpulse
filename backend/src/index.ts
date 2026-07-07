@@ -8,6 +8,9 @@ import morgan from 'morgan';
 
 import sensorRoutes from './routes/sensors';
 import riskRoutes from './routes/risk';
+import eventRoutes from './routes/events';
+import routeRoutes from './routes/route';
+import { startRoadGraphLoader } from './services/roadGraph';
 import { 
   startMockDataGenerator, 
   pauseMockDataGenerator, 
@@ -20,6 +23,7 @@ import {
   updateRiskWeights, 
   evaluateZoneRisks 
 } from './services/riskEngine';
+import { insertReadingsBatch } from './lib/supabase';
 import { registerSSEClient } from './services/realtimeService';
 import { supabase } from './lib/supabase';
 
@@ -107,15 +111,11 @@ app.post('/api/simulation/inject', async (req, res) => {
       sensor_id: r.sensor_id,
       value: r.value,
       recorded_at: now,
+      data_source: 'mock' as const,
     }));
 
-    // 1. Insert into database
-    const { data: inserted, error: dbErr } = await supabase
-      .from('readings')
-      .insert(batch)
-      .select();
-
-    if (dbErr) throw dbErr;
+    // 1. Insert into database using robust insertReadingsBatch
+    const inserted = await insertReadingsBatch(batch);
 
     // 2. Broadcast inserted readings to SSE
     const { data: sensors } = await supabase.from('sensors').select('*');
@@ -152,6 +152,8 @@ app.post('/api/simulation/inject', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 app.use('/api/sensors', sensorRoutes);
 app.use('/api/risk', riskRoutes);
+app.use('/api/events', eventRoutes);
+app.use('/api/route', routeRoutes);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 404 fallback
@@ -184,6 +186,10 @@ app.listen(PORT, async () => {
 
   // Start the convergence risk engine (runs every 10s)
   startRiskEngine(10_000);
+
+  // Start the road graph loader (fetches OSM data from Overpass API)
+  // Non-blocking: retries every 30s if Overpass is temporarily unavailable
+  startRoadGraphLoader();
 });
 
 export default app;

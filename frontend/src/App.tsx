@@ -41,6 +41,7 @@ interface Reading {
   sensor_id: string;
   value: number;
   recorded_at: string;
+  data_source?: 'live' | 'mock';
 }
 
 interface RiskSnapshot {
@@ -53,8 +54,23 @@ interface RiskSnapshot {
     traffic?: number;
     aqi?: number;
     water_level?: number;
+    event?: number;
     explanation?: string;
+    recommendations?: Array<{ text: string; priority: 'high' | 'medium' | 'low'; trigger: string }>;
   };
+  created_at: string;
+}
+
+interface Event {
+  id: string;
+  name: string;
+  type: 'festival' | 'rally' | 'concert' | 'sports';
+  zone_name: string;
+  lat: number;
+  lng: number;
+  start_time: string;
+  end_time: string;
+  expected_footfall: number;
   created_at: string;
 }
 
@@ -69,6 +85,17 @@ interface ForecastResult {
   confidence: 'high' | 'medium' | 'low';
   data_points: number;
   sparkline_forecast: ForecastPoint[];
+}
+
+interface RouteResult {
+  coordinates: [number, number][];
+  distanceM: number;
+  estimatedMinutes: number;
+  blockedZones: string[];
+  penalizedZones: string[];
+  routeWarning?: string;
+  fromNode: { lat: number; lng: number };
+  toNode:   { lat: number; lng: number };
 }
 
 const ZONE_CENTERS: Record<string, [number, number]> = {
@@ -162,20 +189,121 @@ function generateLocalExplanation(zoneName: string, factors: Record<string, numb
   if (factors.aqi > 200) elevatedFactors.push('hazardous air pollution');
   else if (factors.aqi > 100) elevatedFactors.push('elevated air quality');
 
+  if (factors.event && factors.event > 0) {
+    if (factors.event > 50000) {
+      elevatedFactors.push(`large public event (${factors.event.toLocaleString()} expected footfall)`);
+    } else {
+      elevatedFactors.push(`active public event (${factors.event.toLocaleString()} expected footfall)`);
+    }
+  }
+
   if (elevatedFactors.length === 0) return `Normal conditions monitored in ${zoneName}.`;
   if (elevatedFactors.length === 1) return `${elevatedFactors[0].charAt(0).toUpperCase() + elevatedFactors[0].slice(1)} detected in ${zoneName}.`;
-  return `${elevatedFactors[0].charAt(0).toUpperCase() + elevatedFactors[0].slice(1)} combined with ${elevatedFactors[1]} in ${zoneName}.`;
+  if (elevatedFactors.length === 2) return `${elevatedFactors[0].charAt(0).toUpperCase() + elevatedFactors[0].slice(1)} combined with ${elevatedFactors[1]} in ${zoneName}.`;
+
+  const list = elevatedFactors.slice(0, -1).join(', ') + `, and ${elevatedFactors[elevatedFactors.length - 1]}`;
+  return `${list.charAt(0).toUpperCase() + list.slice(1)} impacting ${zoneName} concurrently.`;
+}
+
+function getLocalRecommendations(zoneName: string, factors: Record<string, number>): Array<{ text: string; priority: 'high' | 'medium' | 'low'; trigger: string }> {
+  const recs: Array<{ text: string; priority: 'high' | 'medium' | 'low'; trigger: string }> = [];
+
+  if (factors.rainfall > 35) {
+    recs.push({
+      text: `Pre-position emergency water pumps at waterlogging hotspots in ${zoneName}.`,
+      priority: 'high',
+      trigger: 'heavy rainfall'
+    });
+  } else if (factors.rainfall > 15) {
+    recs.push({
+      text: `Monitor drainage inlets for potential blockage in ${zoneName}.`,
+      priority: 'medium',
+      trigger: 'rising rainfall'
+    });
+  }
+
+  if (factors.water_level > 50) {
+    recs.push({
+      text: `Close flood-prone underpasses and deploy water rescue teams in ${zoneName}.`,
+      priority: 'high',
+      trigger: 'critical flooding'
+    });
+  } else if (factors.water_level > 20) {
+    recs.push({
+      text: `Alert emergency response teams of rising flood risks in ${zoneName}.`,
+      priority: 'high',
+      trigger: 'rising water levels'
+    });
+  }
+
+  if (factors.traffic > 75) {
+    recs.push({
+      text: `Activate dynamic signal coordination and deploy traffic marshals to relieve gridlock in ${zoneName}.`,
+      priority: 'high',
+      trigger: 'severe traffic gridlock'
+    });
+  } else if (factors.traffic > 40) {
+    recs.push({
+      text: `Advise commuters to use alternative arterial roads in ${zoneName} to bypass congestion.`,
+      priority: 'medium',
+      trigger: 'elevated traffic congestion'
+    });
+  }
+
+  if (factors.aqi > 200) {
+    recs.push({
+      text: `Restrict local emissions and advise residents in ${zoneName} to wear N95 masks outdoors.`,
+      priority: 'high',
+      trigger: 'hazardous air pollution'
+    });
+  } else if (factors.aqi > 100) {
+    recs.push({
+      text: `Recommend sensitive groups in ${zoneName} avoid prolonged outdoor exposure.`,
+      priority: 'medium',
+      trigger: 'elevated air quality index'
+    });
+  }
+
+  if (factors.event && factors.event > 0) {
+    if (factors.event > 50000) {
+      recs.push({
+        text: `Activate major event crowd dispersal protocols at transit nodes in ${zoneName}.`,
+        priority: 'high',
+        trigger: 'large public event'
+      });
+    } else {
+      recs.push({
+        text: `Deploy crowd control teams at local transit stations in ${zoneName}.`,
+        priority: 'medium',
+        trigger: 'active public event'
+      });
+    }
+
+    if (factors.traffic > 50) {
+      recs.push({
+        text: `Divert transit and general traffic away from event venue routes in ${zoneName}.`,
+        priority: 'high',
+        trigger: 'compounding event + traffic'
+      });
+    }
+  }
+
+  return recs.slice(0, 3);
 }
 
 export default function App() {
   const [sensors, setSensors] = useState<Sensor[]>([]);
+  const [events, setEvents] = useState<Event[]>([]);
   const [readings, setReadings] = useState<Record<string, Reading>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   
   // Dashboard states
-  const [activeTab, setActiveTab] = useState<'sensors' | 'risk'>('risk');
+  const [activeTab, setActiveTab] = useState<'sensors' | 'risk' | 'routing'>(() => {
+    const saved = localStorage.getItem('up_active_tab');
+    return (saved as any) || 'risk';
+  });
   const [riskSnapshots, setRiskSnapshots] = useState<RiskSnapshot[]>([]);
   const [riskHistory, setRiskHistory] = useState<Record<string, number[]>>({});
   const [riskForecasts, setRiskForecasts] = useState<Record<string, ForecastResult>>({});
@@ -194,6 +322,7 @@ export default function App() {
     traffic: 0.2,
     aqi: 0.15,
     water_level: 0.35,
+    event: 0.2,
   });
 
   // Layer toggles
@@ -215,8 +344,35 @@ export default function App() {
   const tileLayerRef = useRef<L.TileLayer | null>(null);
   const markersRef = useRef<Record<string, L.Marker>>({});
   const circlesRef = useRef<Record<string, L.Circle>>({});
+  const eventMarkersRef = useRef<Record<string, L.Marker>>({});
 
-  // 1. Fetch sensors on mount
+  // Emergency routing state
+  const [isRoutingMode, setIsRoutingMode] = useState(() => {
+    const saved = localStorage.getItem('up_active_tab');
+    return saved === 'routing';
+  });
+  const [routeFrom, setRouteFrom] = useState<[number, number] | null>(() => {
+    const saved = localStorage.getItem('up_route_from');
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [routeTo, setRouteTo] = useState<[number, number] | null>(() => {
+    const saved = localStorage.getItem('up_route_to');
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [routeResult, setRouteResult] = useState<RouteResult | null>(null);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [routeError, setRouteError] = useState<string | null>(null);
+  const [graphReady, setGraphReady] = useState(false);
+  const routePolylineRef = useRef<L.Polyline | null>(null);
+  const routePinFromRef = useRef<L.Marker | null>(null);
+  const routePinToRef = useRef<L.Marker | null>(null);
+
+  // Coordinate input fields temp state
+  const [tempLatA, setTempLatA] = useState('');
+  const [tempLngA, setTempLngA] = useState('');
+  const [tempLatB, setTempLatB] = useState('');
+  const [tempLngB, setTempLngB] = useState('');
+
   // 1. Fetch sensors and metadata on mount
   useEffect(() => {
     async function fetchSensors() {
@@ -226,6 +382,7 @@ export default function App() {
         const data = await res.json();
         setSensors(data.sensors || []);
         
+        await fetchEvents();
         await fetchLatestReadings(data.sensors || []);
         await fetchRiskData();
         await fetchInitialMeta();
@@ -234,6 +391,18 @@ export default function App() {
         setError('Could not connect to the UrbanPulse API. Make sure the backend server is running on port 3001.');
       } finally {
         setLoading(false);
+      }
+    }
+
+    async function fetchEvents() {
+      try {
+        const res = await fetch('/api/events');
+        if (res.ok) {
+          const data = await res.json();
+          setEvents(data.events || []);
+        }
+      } catch (e) {
+        console.error('Failed to fetch events:', e);
       }
     }
 
@@ -449,6 +618,13 @@ export default function App() {
       let weightedSum = 0;
       const factors: Record<string, number> = {};
 
+      // Fold active events expected footfall as an additional factor
+      const nowStr = new Date().toISOString();
+      const zoneEvents = events.filter(
+        (e) => e.zone_name === zoneName && e.start_time <= nowStr && nowStr <= e.end_time
+      );
+      const totalFootfall = zoneEvents.reduce((sum, e) => sum + e.expected_footfall, 0);
+
       zoneSensors.forEach((sensor) => {
         const r = readings[sensor.id];
         if (r) {
@@ -466,16 +642,25 @@ export default function App() {
         }
       });
 
+      if (totalFootfall > 0) {
+        factors['event'] = totalFootfall;
+        const norm = (totalFootfall / 50000) * 100;
+        const w = weights['event'] ?? 0.20;
+        weightedSum += w * norm;
+        sumOfWeights += w;
+      }
+
       const score = sumOfWeights > 0 ? Math.round((weightedSum / sumOfWeights) * 100) / 100 : 0;
       const category = getRiskCategory(score);
       const explanation = generateLocalExplanation(zoneName, factors);
+      const recommendations = getLocalRecommendations(zoneName, factors);
 
       computedSnapshots.push({
         id: `mock-risk-${zoneName}`,
         zone_name: zoneName,
         score,
         category,
-        factors: { ...factors, explanation },
+        factors: { ...factors, explanation, recommendations },
         created_at: new Date().toISOString()
       });
 
@@ -631,6 +816,59 @@ export default function App() {
     });
     setReadings(initialReadings);
 
+    // Seed mock events
+    const demoSeeds: Event[] = [
+      {
+        id: 'event-demo-1',
+        name: 'Lalbaugcha Raja Ganeshotsav',
+        type: 'festival',
+        zone_name: 'Dadar',
+        lat: 19.0125,
+        lng: 72.8410,
+        start_time: new Date(Date.now() - 3 * 3600000).toISOString(),
+        end_time: new Date(Date.now() + 6 * 3600000).toISOString(),
+        expected_footfall: 80000,
+        created_at: new Date().toISOString()
+      },
+      {
+        id: 'event-demo-2',
+        name: 'BKC Ground Music Concert',
+        type: 'concert',
+        zone_name: 'Bandra',
+        lat: 19.0655,
+        lng: 72.8632,
+        start_time: new Date(Date.now() - 1 * 3600000).toISOString(),
+        end_time: new Date(Date.now() + 4 * 3600000).toISOString(),
+        expected_footfall: 35000,
+        created_at: new Date().toISOString()
+      },
+      {
+        id: 'event-demo-3',
+        name: 'Mithi River Clean-up Rally',
+        type: 'rally',
+        zone_name: 'Kurla',
+        lat: 19.0665,
+        lng: 72.8850,
+        start_time: new Date(Date.now() - 2 * 3600000).toISOString(),
+        end_time: new Date(Date.now() + 1 * 3600000).toISOString(),
+        expected_footfall: 5000,
+        created_at: new Date().toISOString()
+      },
+      {
+        id: 'event-demo-4',
+        name: 'Wankhede IPL T20 Match',
+        type: 'sports',
+        zone_name: 'Colaba',
+        lat: 18.9389,
+        lng: 72.8258,
+        start_time: new Date(Date.now() + 24 * 3600000).toISOString(),
+        end_time: new Date(Date.now() + 28 * 3600000).toISOString(),
+        expected_footfall: 40000,
+        created_at: new Date().toISOString()
+      }
+    ];
+    setEvents(demoSeeds);
+
     // Seed mock sparkline history (12 items)
     const initialHistory: Record<string, number[]> = {};
     Object.keys(ZONE_CENTERS).forEach((zone) => {
@@ -644,6 +882,394 @@ export default function App() {
     });
     setRiskHistory(initialHistory);
   };
+
+  // ─── Emergency Routing ─────────────────────────────────────────────────────
+
+  /**
+   * Minimal hardcoded 12-node road graph for Demo Mode (no backend needed).
+   * Nodes represent real Dadar–Sion–Kurla junctions on OSM.
+   */
+  const DEMO_NODES: Record<string, [number, number]> = {
+    'D1': [19.0176, 72.8431], // Hindmata Jn
+    'D2': [19.0183, 72.8488], // Dadar TT
+    'D3': [19.0230, 72.8550], // Dadar Station East
+    'S1': [19.0403, 72.8619], // Sion Hospital Jn
+    'S2': [19.0411, 72.8650], // Sion Circle
+    'S3': [19.0370, 72.8700], // Sion-Trombay Rd
+    'K1': [19.0659, 72.8823], // Kurla Mithi River
+    'K2': [19.0726, 72.8796], // Kurla LBS Rd
+    'K3': [19.0780, 72.8850], // Kurla Station
+    'M1': [19.0369, 72.8394], // Mahim Creek
+    'M2': [19.0310, 72.8450], // Mahim Causeway
+    'B1': [19.0683, 72.8692], // BKC Traffic Node
+  };
+  const DEMO_EDGES: Array<[string, string, number, string]> = [
+    // [fromId, toId, distanceM, zoneName]
+    ['D1','D2',600,'Dadar'],['D2','D1',600,'Dadar'],
+    ['D2','D3',800,'Dadar'],['D3','D2',800,'Dadar'],
+    ['D3','S1',2200,'Sion'],['S1','D3',2200,'Sion'],
+    ['S1','S2',500,'Sion'],['S2','S1',500,'Sion'],
+    ['S2','S3',600,'Sion'],['S3','S2',600,'Sion'],
+    ['S3','K1',3200,'Kurla'],['K1','S3',3200,'Kurla'],
+    ['K1','K2',500,'Kurla'],['K2','K1',500,'Kurla'],
+    ['K2','K3',600,'Kurla'],['K3','K2',600,'Kurla'],
+    ['D1','M1',3000,'Mahim'],['M1','D1',3000,'Mahim'],
+    ['M1','M2',800,'Mahim'],['M2','M1',800,'Mahim'],
+    ['M2','D2',1200,'Dadar'],['D2','M2',1200,'Dadar'],
+    ['B1','K2',4000,'Kurla'],['K2','B1',4000,'Kurla'],
+    ['B1','D3',4500,'Bandra'],['D3','B1',4500,'Bandra'],
+  ];
+
+  function demoHaversine(a: [number, number], b: [number, number]): number {
+    const R = 6371000;
+    const dLat = (b[0] - a[0]) * Math.PI / 180;
+    const dLng = (b[1] - a[1]) * Math.PI / 180;
+    const sin2 = Math.sin(dLat/2)**2 + Math.cos(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.sin(dLng/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(sin2), Math.sqrt(1-sin2));
+  }
+
+  function demoEdgeWeight(distM: number, zoneName: string): number {
+    const base = (distM / 1000 / 30) * 3600; // 30kph base
+    const snap = riskSnapshots.find(r => r.zone_name === zoneName);
+    if (!snap) return base;
+    if (snap.factors?.water_level !== undefined && (snap.factors.water_level as number) > 60) return Infinity;
+    if (snap.category === 'critical') return base * 4;
+    if (snap.category === 'high') return base * 2;
+    if (snap.category === 'moderate') return base * 1.3;
+    return base;
+  }
+
+  function demoAstar(fromId: string, toId: string): string[] | null {
+    const g = new Map<string, number>();
+    const came = new Map<string, string>();
+    const open = new Set<string>([fromId]);
+    g.set(fromId, 0);
+    while (open.size > 0) {
+      const toCoord = DEMO_NODES[toId];
+      let cur = '';
+      let best = Infinity;
+      for (const n of open) {
+        const f = (g.get(n) ?? Infinity) + demoHaversine(DEMO_NODES[n], toCoord);
+        if (f < best) { best = f; cur = n; }
+      }
+      if (cur === toId) {
+        const path: string[] = [];
+        let n: string | undefined = toId;
+        while (n) { path.unshift(n); n = came.get(n); }
+        return path;
+      }
+      open.delete(cur);
+      for (const [a, b, dist, zone] of DEMO_EDGES) {
+        if (a !== cur) continue;
+        const w = demoEdgeWeight(dist, zone);
+        if (w === Infinity) continue;
+        const ng = (g.get(cur) ?? Infinity) + w;
+        if (ng < (g.get(b) ?? Infinity)) {
+          g.set(b, ng); came.set(b, cur); open.add(b);
+        }
+      }
+    }
+    return null;
+  }
+
+  function getClosestDemoNode(lat: number, lng: number): string {
+    let best = 'D2'; let bestDist = Infinity;
+    for (const [id, coord] of Object.entries(DEMO_NODES)) {
+      const d = demoHaversine([lat, lng], coord);
+      if (d < bestDist) { bestDist = d; best = id; }
+    }
+    return best;
+  }
+
+  /** Draw or update the route polyline on the Leaflet map */
+  function drawRoutePolyline(coords: [number, number][], color = '#06b6d4') {
+    const map = mapRef.current;
+    if (!map || coords.length < 2) return;
+    if (routePolylineRef.current) { routePolylineRef.current.remove(); }
+    routePolylineRef.current = L.polyline(coords, {
+      color,
+      weight: 5,
+      opacity: 0.85,
+      dashArray: color === '#06b6d4' ? undefined : '8,6',
+    }).addTo(map);
+  }
+
+  /** Place a pin marker on the map */
+  function placePin(lat: number, lng: number, color: string, label: string): L.Marker {
+    const map = mapRef.current!;
+    const icon = L.divIcon({
+      html: `<div style="background:${color};width:18px;height:18px;border-radius:50%;border:3px solid white;box-shadow:0 0 8px ${color};display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;color:white">${label}</div>`,
+      className: 'route-pin',
+      iconSize: [22, 22],
+      iconAnchor: [11, 11],
+    });
+    return L.marker([lat, lng], { icon }).addTo(map);
+  }
+
+  /** Clear all routing overlays */
+  const clearRoute = () => {
+    if (routePolylineRef.current) { routePolylineRef.current.remove(); routePolylineRef.current = null; }
+    if (routePinFromRef.current) { routePinFromRef.current.remove(); routePinFromRef.current = null; }
+    if (routePinToRef.current) { routePinToRef.current.remove(); routePinToRef.current = null; }
+    setRouteFrom(null);
+    setRouteTo(null);
+    setRouteResult(null);
+    setRouteError(null);
+  };
+
+  const clearOrigin = () => {
+    if (routePinFromRef.current) {
+      routePinFromRef.current.remove();
+      routePinFromRef.current = null;
+    }
+    setRouteFrom(null);
+    setRouteResult(null);
+    setRouteError(null);
+    if (routePolylineRef.current) {
+      routePolylineRef.current.remove();
+      routePolylineRef.current = null;
+    }
+  };
+
+  const clearDestination = () => {
+    if (routePinToRef.current) {
+      routePinToRef.current.remove();
+      routePinToRef.current = null;
+    }
+    setRouteTo(null);
+    setRouteResult(null);
+    setRouteError(null);
+    if (routePolylineRef.current) {
+      routePolylineRef.current.remove();
+      routePolylineRef.current = null;
+    }
+  };
+
+  const updateOriginCoords = (lat: number, lng: number) => {
+    setRouteFrom([lat, lng]);
+    if (routePinFromRef.current) { routePinFromRef.current.remove(); }
+    const map = mapRef.current;
+    if (map) {
+      routePinFromRef.current = placePin(lat, lng, '#10b981', 'A');
+    }
+    if (routeTo) {
+      fetchRoute([lat, lng], routeTo);
+    }
+  };
+
+  const updateDestinationCoords = (lat: number, lng: number) => {
+    setRouteTo([lat, lng]);
+    if (routePinToRef.current) { routePinToRef.current.remove(); }
+    const map = mapRef.current;
+    if (map) {
+      routePinToRef.current = placePin(lat, lng, '#ef4444', 'B');
+    }
+    if (routeFrom) {
+      fetchRoute(routeFrom, [lat, lng]);
+    }
+  };
+
+  const handleApplyA = () => {
+    const lat = parseFloat(tempLatA);
+    const lng = parseFloat(tempLngA);
+    if (!isNaN(lat) && !isNaN(lng)) {
+      updateOriginCoords(lat, lng);
+    }
+  };
+
+  const handleApplyB = () => {
+    const lat = parseFloat(tempLatB);
+    const lng = parseFloat(tempLngB);
+    if (!isNaN(lat) && !isNaN(lng)) {
+      updateDestinationCoords(lat, lng);
+    }
+  };
+
+  // Sync map clicks with local text states
+  useEffect(() => {
+    if (routeFrom) {
+      setTempLatA(routeFrom[0].toFixed(6));
+      setTempLngA(routeFrom[1].toFixed(6));
+    } else {
+      setTempLatA('');
+      setTempLngA('');
+    }
+  }, [routeFrom]);
+
+  useEffect(() => {
+    if (routeTo) {
+      setTempLatB(routeTo[0].toFixed(6));
+      setTempLngB(routeTo[1].toFixed(6));
+    } else {
+      setTempLatB('');
+      setTempLngB('');
+    }
+  }, [routeTo]);
+
+  /** Fetch route (live mode → API, demo mode → in-browser A*) */
+  const fetchRoute = async (from: [number, number], to: [number, number]) => {
+    setRouteLoading(true);
+    setRouteError(null);
+    setRouteResult(null);
+
+    try {
+      if (isDemoMode) {
+        // Client-side A* over the demo mini-graph
+        const fromId = getClosestDemoNode(from[0], from[1]);
+        const toId = getClosestDemoNode(to[0], to[1]);
+        const path = demoAstar(fromId, toId);
+        if (!path) {
+          setRouteError('No route found — path may be blocked by flood conditions.');
+          setRouteLoading(false);
+          return;
+        }
+        const coords: [number, number][] = path.map(id => DEMO_NODES[id]);
+        const totalDistM = path.reduce((sum, id, i) =>
+          i === 0 ? 0 : sum + demoHaversine(DEMO_NODES[path[i-1]], DEMO_NODES[id]), 0
+        );
+        const blockedZones = riskSnapshots
+          .filter(r => r.factors?.water_level !== undefined && (r.factors.water_level as number) > 60)
+          .map(r => r.zone_name);
+        const penalizedZones = riskSnapshots
+          .filter(r => (r.category === 'high' || r.category === 'critical') && !blockedZones.includes(r.zone_name))
+          .map(r => r.zone_name);
+        const result: RouteResult = {
+          coordinates: coords,
+          distanceM: Math.round(totalDistM),
+          estimatedMinutes: Math.round((totalDistM / 1000 / 30) * 60 * 10) / 10,
+          blockedZones,
+          penalizedZones,
+          routeWarning: blockedZones.length > 0
+            ? `Route avoids flood-closed: ${blockedZones.join(', ')}.`
+            : penalizedZones.length > 0
+              ? `Elevated risk in: ${penalizedZones.join(', ')}. Expect delays.`
+              : undefined,
+          fromNode: { lat: coords[0][0], lng: coords[0][1] },
+          toNode:   { lat: coords[coords.length-1][0], lng: coords[coords.length-1][1] },
+        };
+        setRouteResult(result);
+        drawRoutePolyline(coords);
+      } else {
+        // Live API call
+        const resp = await fetch('/api/route', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: { lat: from[0], lng: from[1] }, to: { lat: to[0], lng: to[1] } }),
+        });
+        if (!resp.ok) {
+          const err = await resp.json();
+          setRouteError(err.error ?? 'Route computation failed.');
+          setRouteLoading(false);
+          return;
+        }
+        const result: RouteResult = await resp.json();
+        setRouteResult(result);
+        drawRoutePolyline(result.coordinates);
+      }
+    } catch (e: any) {
+      setRouteError('Network error during route computation.');
+    }
+    setRouteLoading(false);
+  };
+
+  // Poll graph readiness in live mode
+  useEffect(() => {
+    if (isDemoMode) { setGraphReady(true); return; }
+    const check = async () => {
+      try {
+        const r = await fetch('/api/route/status');
+        if (r.ok) { const d = await r.json(); setGraphReady(d.ready); }
+      } catch { /* silent */ }
+    };
+    check();
+    const id = setInterval(check, 5000);
+    return () => clearInterval(id);
+  }, [isDemoMode]);
+
+  // Save routeFrom to localStorage and sync inputs
+  useEffect(() => {
+    if (routeFrom) {
+      localStorage.setItem('up_route_from', JSON.stringify(routeFrom));
+      setTempLatA(routeFrom[0].toFixed(5));
+      setTempLngA(routeFrom[1].toFixed(5));
+    } else {
+      localStorage.removeItem('up_route_from');
+      setTempLatA('');
+      setTempLngA('');
+    }
+  }, [routeFrom]);
+
+  // Save routeTo to localStorage and sync inputs
+  useEffect(() => {
+    if (routeTo) {
+      localStorage.setItem('up_route_to', JSON.stringify(routeTo));
+      setTempLatB(routeTo[0].toFixed(5));
+      setTempLngB(routeTo[1].toFixed(5));
+    } else {
+      localStorage.removeItem('up_route_to');
+      setTempLatB('');
+      setTempLngB('');
+    }
+  }, [routeTo]);
+
+  // Save activeTab to localStorage
+  useEffect(() => {
+    localStorage.setItem('up_active_tab', activeTab);
+  }, [activeTab]);
+
+  // Draw polyline when routeResult changes
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (routeResult && routeResult.coordinates.length > 0) {
+      drawRoutePolyline(routeResult.coordinates);
+    } else {
+      if (routePolylineRef.current) {
+        routePolylineRef.current.remove();
+        routePolylineRef.current = null;
+      }
+    }
+  }, [routeResult]);
+
+  // Auto-reroute when risk snapshots change or when coordinates are initialized
+  useEffect(() => {
+    if (routeFrom && routeTo) {
+      fetchRoute(routeFrom, routeTo);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [riskSnapshots, routeFrom, routeTo]);
+
+  // Attach map click handler for routing mode
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (!isRoutingMode) {
+      // Remove cursor hint when not routing
+      map.getContainer().style.cursor = '';
+      return;
+    }
+    map.getContainer().style.cursor = 'crosshair';
+
+    const onClick = (e: L.LeafletMouseEvent) => {
+      const { lat, lng } = e.latlng;
+      if (!routeFrom) {
+        setRouteFrom([lat, lng]);
+        if (routePinFromRef.current) { routePinFromRef.current.remove(); }
+        routePinFromRef.current = placePin(lat, lng, '#10b981', 'A');
+        if (routeTo) {
+          fetchRoute([lat, lng], routeTo);
+        }
+      } else if (!routeTo) {
+        setRouteTo([lat, lng]);
+        if (routePinToRef.current) { routePinToRef.current.remove(); }
+        routePinToRef.current = placePin(lat, lng, '#ef4444', 'B');
+        fetchRoute(routeFrom, [lat, lng]);
+      }
+    };
+    map.on('click', onClick);
+    return () => { map.off('click', onClick); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRoutingMode, routeFrom, routeTo]);
 
   // 7. Leaflet Map setup
   useEffect(() => {
@@ -663,6 +1289,30 @@ export default function App() {
 
     tileLayerRef.current = osmLayer;
     mapRef.current = map;
+
+    // Draw saved routing markers from localStorage if present on map mount
+    const savedFrom = localStorage.getItem('up_route_from');
+    if (savedFrom) {
+      const fromCoords = JSON.parse(savedFrom);
+      const icon = L.divIcon({
+        html: `<div style="background:#10b981;width:18px;height:18px;border-radius:50%;border:3px solid white;box-shadow:0 0 8px #10b981;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;color:white">A</div>`,
+        className: 'route-pin',
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+      });
+      routePinFromRef.current = L.marker(fromCoords, { icon }).addTo(map);
+    }
+    const savedTo = localStorage.getItem('up_route_to');
+    if (savedTo) {
+      const toCoords = JSON.parse(savedTo);
+      const icon = L.divIcon({
+        html: `<div style="background:#ef4444;width:18px;height:18px;border-radius:50%;border:3px solid white;box-shadow:0 0 8px #ef4444;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;color:white">B</div>`,
+        className: 'route-pin',
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+      });
+      routePinToRef.current = L.marker(toCoords, { icon }).addTo(map);
+    }
 
     return () => {
       if (mapRef.current) {
@@ -692,7 +1342,7 @@ export default function App() {
     const map = mapRef.current;
     if (!map) return;
 
-    // A. Clean old markers
+    // A. Clean old sensors markers
     Object.entries(markersRef.current).forEach(([id, marker]) => {
       const sensor = sensors.find(s => s.id === id);
       const isVisible = sensor && activeTypes[sensor.type] && activeTab === 'sensors';
@@ -712,7 +1362,16 @@ export default function App() {
       }
     });
 
-    // C. Draw active sensors (Sensor Net view)
+    // C. Clean old event markers
+    Object.entries(eventMarkersRef.current).forEach(([id, marker]) => {
+      const event = events.find(e => e.id === id);
+      if (!event) {
+        marker.remove();
+        delete eventMarkersRef.current[id];
+      }
+    });
+
+    // D. Draw active sensors (Sensor Net view)
     if (activeTab === 'sensors') {
       sensors.forEach((sensor) => {
         if (!activeTypes[sensor.type]) return;
@@ -764,7 +1423,62 @@ export default function App() {
       });
     }
 
-    // D. Draw risk overlays (Risk Twin view)
+    // E. Draw event markers (Always visible or in risk tab)
+    events.forEach((event) => {
+      const now = new Date().toISOString();
+      const isActive = event.start_time <= now && now <= event.end_time;
+      const markerColor = isActive ? '#ec4899' : '#94a3b8'; // pink if active, slate if scheduled
+      const pulseClass = isActive ? 'animate-ping opacity-75' : '';
+      const emoji = event.type === 'festival' ? '🎪' : event.type === 'rally' ? '📢' : event.type === 'concert' ? '🎵' : '🏆';
+
+      const iconHtml = `
+        <div class="relative flex items-center justify-center w-8 h-8">
+          ${isActive ? `<span class="absolute inline-flex h-full w-full rounded-full bg-[${markerColor}] ${pulseClass}"></span>` : ''}
+          <div class="relative w-7 h-7 rounded-full border border-slate-900 shadow-md flex items-center justify-center text-xs" 
+               style="background-color: ${markerColor}; box-shadow: 0 0 10px ${markerColor}; color: white; display: flex; align-items: center; justify-content: center;">
+            ${emoji}
+          </div>
+        </div>
+      `;
+
+      const customIcon = L.divIcon({
+        html: iconHtml,
+        className: 'custom-event-icon',
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
+      });
+
+      const popupContent = `
+        <div class="p-3 font-sans w-56 bg-slate-900 rounded-lg text-slate-200 text-left">
+          <div class="text-[9px] uppercase font-bold tracking-wider text-pink-400 border-b border-slate-800 pb-1 mb-2">
+            ${event.type.toUpperCase()} EVENT ${isActive ? '· ACTIVE NOW' : ''}
+          </div>
+          <div class="font-semibold text-white leading-tight">${event.name}</div>
+          <div class="text-[11px] text-slate-500 mt-1">${event.zone_name}</div>
+          <div class="mt-2 p-2 bg-slate-950 rounded text-center">
+            <span class="text-xs text-slate-400 block font-medium">Expected Footfall</span>
+            <span class="text-base font-bold text-white">${event.expected_footfall.toLocaleString()}</span>
+          </div>
+          <div class="text-[10px] text-slate-400 mt-2">
+            Start: ${new Date(event.start_time).toLocaleString()}<br/>
+            End: ${new Date(event.end_time).toLocaleString()}
+          </div>
+        </div>
+      `;
+
+      if (eventMarkersRef.current[event.id]) {
+        const marker = eventMarkersRef.current[event.id];
+        marker.setIcon(customIcon);
+        marker.setPopupContent(popupContent);
+      } else {
+        const marker = L.marker([event.lat, event.lng], { icon: customIcon })
+          .addTo(map)
+          .bindPopup(popupContent, { minWidth: 220 });
+        eventMarkersRef.current[event.id] = marker;
+      }
+    });
+
+    // F. Draw risk overlays (Risk Twin view)
     if (activeTab === 'risk' && showRiskOverlay) {
       riskSnapshots.forEach((snapshot) => {
         const center = ZONE_CENTERS[snapshot.zone_name];
@@ -794,7 +1508,7 @@ export default function App() {
         }
       });
     }
-  }, [sensors, readings, riskSnapshots, activeTypes, activeTab, showRiskOverlay, selectedZoneName]);
+  }, [sensors, readings, riskSnapshots, activeTypes, activeTab, showRiskOverlay, selectedZoneName, events]);
 
   const handleZoneSelect = (zoneName: string) => {
     setSelectedZoneName(zoneName);
@@ -902,7 +1616,7 @@ export default function App() {
         {/* View Toggle Tabs */}
         <div className="px-5 pt-4 flex gap-1.5">
           <button 
-            onClick={() => setActiveTab('risk')}
+            onClick={() => { setActiveTab('risk'); setIsRoutingMode(false); }}
             className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-semibold border transition-all duration-200 ${
               activeTab === 'risk' 
                 ? `${themeTabActive} border-transparent` 
@@ -913,7 +1627,7 @@ export default function App() {
             Risk Twin View
           </button>
           <button 
-            onClick={() => setActiveTab('sensors')}
+            onClick={() => { setActiveTab('sensors'); setIsRoutingMode(false); }}
             className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-semibold border transition-all duration-200 ${
               activeTab === 'sensors' 
                 ? `${themeTabActive} border-transparent` 
@@ -922,6 +1636,17 @@ export default function App() {
           >
             <Activity className="w-3.5 h-3.5" />
             Sensor Net View
+          </button>
+          <button 
+            onClick={() => { setActiveTab('routing'); setIsRoutingMode(true); }}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-semibold border transition-all duration-200 ${
+              activeTab === 'routing' 
+                ? 'bg-cyan-600/30 text-cyan-300 border-cyan-500/40' 
+                : `bg-transparent border-transparent ${themeTextMuted} hover:text-cyan-300`
+            }`}
+          >
+            <ShieldAlert className="w-3.5 h-3.5" />
+            Emergency Route
           </button>
         </div>
 
@@ -1004,6 +1729,7 @@ export default function App() {
                       { id: 'traffic', label: 'Traffic Weight' },
                       { id: 'aqi', label: 'Air Quality Weight' },
                       { id: 'water_level', label: 'Water Level Weight' },
+                      { id: 'event', label: 'Event Weight' },
                     ].map((w) => (
                       <div key={w.id} className="space-y-1">
                         <div className="flex justify-between text-xs font-semibold">
@@ -1205,6 +1931,13 @@ export default function App() {
                           </div>
                           <div className="flex items-center justify-end gap-1 mt-0.5">
                             <span className={`w-1.5 h-1.5 rounded-full ${indicatorDot}`} />
+                            {reading && (
+                              <span className={`text-[8px] font-mono font-bold uppercase tracking-wider scale-90 origin-right ${
+                                reading.data_source === 'live' ? 'text-emerald-500' : 'text-amber-500'
+                              }`}>
+                                {reading.data_source ?? 'mock'}
+                              </span>
+                            )}
                           </div>
                         </div>
                         <button
@@ -1223,6 +1956,329 @@ export default function App() {
                 })
               )}
             </div>
+          </div>
+        )}
+
+        {/* ── TAB C: EMERGENCY ROUTE OPTIMIZER ── */}
+        {activeTab === 'routing' && (
+          <div className="flex-1 flex flex-col overflow-y-auto">
+
+            {/* Header banner */}
+            <div className={`p-5 border-b ${isDarkMode ? 'border-slate-800/40' : 'border-slate-200'}`}>
+              <div className="flex items-center gap-2 mb-1">
+                <ShieldAlert className="w-4 h-4 text-cyan-400" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-cyan-400">Emergency Route Optimizer</h3>
+              </div>
+              <p className={`text-[11px] ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                Risk-aware routing using live OSM road network. Routes automatically avoid flood-closed zones and penalise high-risk areas.
+              </p>
+
+              {/* Graph status badge */}
+              <div className={`mt-3 flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-mono ${
+                graphReady
+                  ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400'
+                  : 'bg-amber-500/10 border border-amber-500/30 text-amber-400'
+              }`}>
+                <span className={`w-2 h-2 rounded-full ${graphReady ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400 animate-ping'}`} />
+                {isDemoMode
+                  ? '✓ Demo graph ready (12 Dadar–Kurla–Sion junctions)'
+                  : graphReady
+                    ? '✓ OSM road graph loaded — real road network active'
+                    : '⏳ Loading road network from OpenStreetMap…'}
+              </div>
+            </div>
+            <div className={`p-5 border-b ${isDarkMode ? 'border-slate-800/40' : 'border-slate-200'}`}>
+              <h4 className={`text-[10px] uppercase font-bold tracking-wider mb-2 ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                Emergency Routing Coordinates
+              </h4>
+              <p className="text-[10px] text-slate-500 mb-3">
+                Click two points on the map to route, or type coordinates below. Press Enter to apply.
+              </p>
+              
+              <div className="space-y-3">
+                {/* Origin A Panel */}
+                <div className={`p-3 rounded-lg space-y-2 border ${
+                  isDarkMode 
+                    ? 'bg-slate-800/40 border-slate-700/50' 
+                    : 'bg-slate-100 border-slate-200'
+                }`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center text-white text-[10px] font-bold">A</span>
+                      <span className={`text-[11px] font-bold uppercase tracking-wider ${isDarkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                        Origin
+                      </span>
+                    </div>
+                    {routeFrom && (
+                      <button 
+                        onClick={clearOrigin}
+                        className="text-[10px] text-red-400 hover:text-red-300 transition-colors flex items-center gap-1"
+                        title="Remove Origin"
+                      >
+                        ✕ Remove
+                      </button>
+                    )}
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[9px] uppercase font-bold text-slate-500 block mb-0.5">Latitude</label>
+                      <input 
+                        type="number"
+                        step="any"
+                        placeholder="Click map..."
+                        value={tempLatA}
+                        onChange={(e) => setTempLatA(e.target.value)}
+                        onBlur={handleApplyA}
+                        onKeyDown={(e) => e.key === 'Enter' && handleApplyA()}
+                        className={`w-full text-xs px-2 py-1 rounded border transition-colors ${
+                          isDarkMode 
+                            ? 'bg-slate-900 border-slate-700 text-white focus:border-cyan-500 focus:outline-none' 
+                            : 'bg-white border-slate-300 text-slate-800 focus:border-cyan-500 focus:outline-none'
+                        }`}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[9px] uppercase font-bold text-slate-500 block mb-0.5">Longitude</label>
+                      <input 
+                        type="number"
+                        step="any"
+                        placeholder="Click map..."
+                        value={tempLngA}
+                        onChange={(e) => setTempLngA(e.target.value)}
+                        onBlur={handleApplyA}
+                        onKeyDown={(e) => e.key === 'Enter' && handleApplyA()}
+                        className={`w-full text-xs px-2 py-1 rounded border transition-colors ${
+                          isDarkMode 
+                            ? 'bg-slate-900 border-slate-700 text-white focus:border-cyan-500 focus:outline-none' 
+                            : 'bg-white border-slate-300 text-slate-800 focus:border-cyan-500 focus:outline-none'
+                        }`}
+                      />
+                    </div>
+                  </div>
+                  {!routeFrom && (
+                    <p className="text-[10px] text-amber-400/90 italic">Click on map or type above to set origin</p>
+                  )}
+                </div>
+
+                {/* Destination B Panel */}
+                <div className={`p-3 rounded-lg space-y-2 border ${
+                  isDarkMode 
+                    ? 'bg-slate-800/40 border-slate-700/50' 
+                    : 'bg-slate-100 border-slate-200'
+                }`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="w-5 h-5 rounded-full bg-red-500 flex items-center justify-center text-white text-[10px] font-bold">B</span>
+                      <span className={`text-[11px] font-bold uppercase tracking-wider ${isDarkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                        Destination
+                      </span>
+                    </div>
+                    {routeTo && (
+                      <button 
+                        onClick={clearDestination}
+                        className="text-[10px] text-red-400 hover:text-red-300 transition-colors flex items-center gap-1"
+                        title="Remove Destination"
+                      >
+                        ✕ Remove
+                      </button>
+                    )}
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[9px] uppercase font-bold text-slate-500 block mb-0.5">Latitude</label>
+                      <input 
+                        type="number"
+                        step="any"
+                        placeholder="Click map..."
+                        value={tempLatB}
+                        onChange={(e) => setTempLatB(e.target.value)}
+                        onBlur={handleApplyB}
+                        onKeyDown={(e) => e.key === 'Enter' && handleApplyB()}
+                        className={`w-full text-xs px-2 py-1 rounded border transition-colors ${
+                          isDarkMode 
+                            ? 'bg-slate-900 border-slate-700 text-white focus:border-cyan-500 focus:outline-none' 
+                            : 'bg-white border-slate-300 text-slate-800 focus:border-cyan-500 focus:outline-none'
+                        }`}
+                        disabled={!routeFrom}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[9px] uppercase font-bold text-slate-500 block mb-0.5">Longitude</label>
+                      <input 
+                        type="number"
+                        step="any"
+                        placeholder="Click map..."
+                        value={tempLngB}
+                        onChange={(e) => setTempLngB(e.target.value)}
+                        onBlur={handleApplyB}
+                        onKeyDown={(e) => e.key === 'Enter' && handleApplyB()}
+                        className={`w-full text-xs px-2 py-1 rounded border transition-colors ${
+                          isDarkMode 
+                            ? 'bg-slate-900 border-slate-700 text-white focus:border-cyan-500 focus:outline-none' 
+                            : 'bg-white border-slate-300 text-slate-800 focus:border-cyan-500 focus:outline-none'
+                        }`}
+                        disabled={!routeFrom}
+                      />
+                    </div>
+                  </div>
+                  {!routeTo && (
+                    <p className="text-[10px] text-slate-400 italic">
+                      {routeFrom ? 'Click on map or type above to set destination' : 'Set origin first'}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Controls row */}
+              <div className="flex gap-2 mt-4">
+                {(routeFrom || routeTo) && (
+                  <button
+                    onClick={clearRoute}
+                    className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold border transition-colors ${
+                      isDarkMode
+                        ? 'border-slate-600 text-slate-400 hover:text-white hover:border-slate-400'
+                        : 'border-slate-300 text-slate-500 hover:text-slate-800'
+                    }`}
+                  >
+                    Clear All
+                  </button>
+                )}
+                {routeFrom && routeTo && (
+                  <button
+                    onClick={() => fetchRoute(routeFrom!, routeTo!)}
+                    disabled={routeLoading}
+                    className="flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white transition-colors disabled:opacity-50"
+                  >
+                    Recalculate
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Route result card */}
+            {routeLoading && (
+              <div className="p-5 flex flex-col items-center gap-2">
+                <div className="w-6 h-6 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+                <p className="text-xs text-slate-400">Computing optimal route…</p>
+              </div>
+            )}
+
+            {routeError && !routeLoading && (
+              <div className="p-5">
+                <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/30">
+                  <p className="text-xs text-red-400 font-semibold">⚠ Route Error</p>
+                  <p className="text-[11px] text-red-300 mt-1">{routeError}</p>
+                </div>
+              </div>
+            )}
+
+            {routeResult && !routeLoading && (
+              <div className="p-5 space-y-3">
+                {/* ETA / Distance row */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className={`p-3 rounded-xl border ${isDarkMode ? 'bg-slate-800/60 border-slate-700/40' : 'bg-slate-50 border-slate-200'}`}>
+                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold font-mono">Distance</p>
+                    <p className={`text-xl font-bold mt-1 ${isDarkMode ? 'text-white' : 'text-slate-800'}`}>
+                      {(routeResult.distanceM / 1000).toFixed(2)}
+                      <span className="text-sm font-normal text-slate-500"> km</span>
+                    </p>
+                  </div>
+                  <div className={`p-3 rounded-xl border ${isDarkMode ? 'bg-slate-800/60 border-slate-700/40' : 'bg-slate-50 border-slate-200'}`}>
+                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold font-mono">ETA</p>
+                    <p className={`text-xl font-bold mt-1 ${isDarkMode ? 'text-white' : 'text-slate-800'}`}>
+                      {routeResult.estimatedMinutes}
+                      <span className="text-sm font-normal text-slate-500"> min</span>
+                    </p>
+                  </div>
+                </div>
+
+                {/* Route warning */}
+                {routeResult.routeWarning && (
+                  <div className={`p-3 rounded-lg border ${
+                    routeResult.blockedZones.length > 0
+                      ? 'bg-red-500/10 border-red-500/30'
+                      : 'bg-amber-500/10 border-amber-500/30'
+                  }`}>
+                    <p className={`text-[11px] font-semibold ${
+                      routeResult.blockedZones.length > 0 ? 'text-red-400' : 'text-amber-400'
+                    }`}>
+                      {routeResult.blockedZones.length > 0 ? '🚫 Flood Detour Applied' : '⚠ Risk Zones Detected'}
+                    </p>
+                    <p className="text-[11px] text-slate-300 mt-1">{routeResult.routeWarning}</p>
+                  </div>
+                )}
+
+                {/* Blocked zones */}
+                {routeResult.blockedZones.length > 0 && (
+                  <div>
+                    <p className="text-[10px] uppercase font-bold text-slate-500 tracking-wider mb-2">Flood-Closed Zones (Blocked)</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {routeResult.blockedZones.map(z => (
+                        <span key={z} className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-500/20 text-red-400 border border-red-500/30">
+                          {z}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Penalized zones */}
+                {routeResult.penalizedZones.length > 0 && (
+                  <div>
+                    <p className="text-[10px] uppercase font-bold text-slate-500 tracking-wider mb-2">Elevated-Risk Zones (Slowed)</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {routeResult.penalizedZones.map(z => (
+                        <span key={z} className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                          {z}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Path waypoints */}
+                <div>
+                  <p className="text-[10px] uppercase font-bold text-slate-500 tracking-wider mb-2">
+                    Route waypoints ({routeResult.coordinates.length} nodes)
+                  </p>
+                  <div className={`max-h-32 overflow-y-auto rounded-lg border px-3 py-2 space-y-1 ${isDarkMode ? 'border-slate-700/40 bg-slate-900/30' : 'border-slate-200 bg-slate-50'}`}>
+                    {routeResult.coordinates.slice(0, 8).map(([lat, lng], i) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <span className="w-4 h-4 rounded-full bg-cyan-500/20 text-cyan-400 flex items-center justify-center text-[8px] font-mono">{i+1}</span>
+                        <span className="text-[10px] font-mono text-slate-500">{lat.toFixed(5)}, {lng.toFixed(5)}</span>
+                      </div>
+                    ))}
+                    {routeResult.coordinates.length > 8 && (
+                      <p className="text-[10px] text-slate-600 text-center">… +{routeResult.coordinates.length - 8} more</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Auto-reroute note */}
+                <p className="text-[10px] text-slate-600 text-center italic">
+                  Route auto-updates when zone risk changes via simulator ↺
+                </p>
+              </div>
+            )}
+
+            {/* Empty state */}
+            {!routeFrom && !routeLoading && !routeResult && (
+              <div className="flex-1 flex flex-col items-center justify-center p-8 gap-4 text-center">
+                <div className="w-16 h-16 rounded-full bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
+                  <ShieldAlert className="w-7 h-7 text-cyan-500/60" />
+                </div>
+                <div>
+                  <p className={`text-sm font-semibold ${isDarkMode ? 'text-white' : 'text-slate-700'}`}>Ready for Emergency Routing</p>
+                  <p className="text-xs text-slate-500 mt-1">Click any two points on the map to compute a risk-aware emergency route</p>
+                </div>
+                <div className={`text-[10px] px-4 py-2 rounded-lg border ${isDarkMode ? 'border-slate-700 text-slate-500 bg-slate-800/40' : 'border-slate-200 text-slate-400 bg-slate-50'}`}>
+                  💡 Try with What-If Simulator: flood a zone, then route through it
+                </div>
+              </div>
+            )}
+
           </div>
         )}
       </aside>
@@ -1282,8 +2338,10 @@ export default function App() {
                 { id: 'traffic', label: 'Traffic Density', max: 100, unit: '%' },
                 { id: 'aqi', label: 'Air Pollution (AQI)', max: 400, unit: 'AQI' },
                 { id: 'water_level', label: 'Water Level', max: 100, unit: 'cm' },
+                { id: 'event', label: 'Event Footfall', max: 50000, unit: 'people' },
               ].map((factor) => {
                 const val = selectedSnapshot.factors[factor.id as keyof typeof selectedSnapshot.factors] as number | undefined;
+                if (factor.id === 'event' && !val) return null; // Only show event factor if active/greater than 0
                 const percentage = val !== undefined ? Math.min((val / factor.max) * 100, 100) : 0;
                 
                 return (
@@ -1291,7 +2349,11 @@ export default function App() {
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-slate-400 font-medium">{factor.label}</span>
                       <span className="font-semibold text-white font-mono">
-                        {val !== undefined ? `${val} ${factor.unit}` : 'no data'}
+                        {val !== undefined 
+                          ? factor.id === 'event' 
+                            ? `${val.toLocaleString()} ${factor.unit}` 
+                            : `${val} ${factor.unit}` 
+                          : 'no data'}
                       </span>
                     </div>
                     <div className="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden">
@@ -1303,6 +2365,29 @@ export default function App() {
                   </div>
                 );
               })}
+            </div>
+
+            {/* AI Recommendations */}
+            <div className="space-y-2 border-t border-slate-800/60 pt-3">
+              <h4 className="text-[10px] font-bold uppercase text-slate-400 tracking-wider">AI Recommendations</h4>
+              <div className="space-y-1.5">
+                {(selectedSnapshot.factors.recommendations || []).map((rec: any, i: number) => (
+                  <div key={i} className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800/80 text-[11px] text-slate-300 text-left">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className={`text-[8px] uppercase font-bold px-1.5 py-0.5 rounded tracking-wider ${
+                        rec.priority === 'high' ? 'bg-red-950/40 text-red-400 border border-red-900/40' : 'bg-slate-800 text-slate-400'
+                      }`}>
+                        {rec.priority} Priority
+                      </span>
+                      <span className="text-[8px] text-slate-500 font-medium italic">via {rec.trigger}</span>
+                    </div>
+                    <p className="text-xs text-gray-200 leading-normal">{rec.text}</p>
+                  </div>
+                ))}
+                {(!selectedSnapshot.factors.recommendations || selectedSnapshot.factors.recommendations.length === 0) && (
+                  <p className="text-[11px] text-slate-500 italic text-left">No special actions recommended at this time.</p>
+                )}
+              </div>
             </div>
 
             {/* Historical Trend + Forecast sparkline */}

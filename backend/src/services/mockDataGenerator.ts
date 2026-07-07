@@ -161,8 +161,11 @@ export function isMockDataGeneratorPaused(): boolean {
   return isSimulationPaused;
 }
 
+import { fetchAllLiveReadings } from './liveDataService';
+import { insertReadingsBatch } from '../lib/supabase';
+
 /**
- * Start the mock-data generator.
+ * Start the mock-data / live-data generator.
  * Inserts one reading per sensor every `intervalMs` milliseconds (default 5 s).
  * Idempotent — calling multiple times returns the existing handle.
  */
@@ -175,47 +178,48 @@ export async function startMockDataGenerator(intervalMs = 5_000): Promise<void> 
   // Fetch all sensors once at startup
   const { data: sensors, error } = await supabase
     .from('sensors')
-    .select('id, type, zone_name, name');
+    .select('id, type, zone_name, name, lat, lng');
 
   if (error || !sensors || sensors.length === 0) {
     console.error('[MockGen] Could not load sensors — is the DB seeded?', error?.message);
     return;
   }
 
-  console.log(`[MockGen] Starting — will generate readings for ${sensors.length} sensors every ${intervalMs / 1000}s`);
+  console.log(`[MockGen] Starting — will generate/fetch readings for ${sensors.length} sensors every ${intervalMs / 1000}s`);
 
   generatorHandle = setInterval(async () => {
-    // If simulation is paused, do not auto-generate mock readings
+    // If simulation is paused, do not auto-generate/fetch readings
     if (isSimulationPaused) {
       return;
     }
 
     const now = new Date().toISOString();
 
-    const batch = (sensors as Sensor[]).map((s) => ({
-      sensor_id: s.id,
-      value: nextValue(s.id, s.type),
-      recorded_at: now,
-    }));
+    try {
+      // Fetch live readings (or fallback mock) for all sensors
+      const liveReadings = await fetchAllLiveReadings(sensors as Sensor[]);
 
-    const { data: insertedReadings, error: insertError } = await supabase
-      .from('readings')
-      .insert(batch)
-      .select();
+      const batch = liveReadings.map(r => ({
+        sensor_id: r.sensor_id,
+        value: r.value,
+        recorded_at: now,
+        data_source: r.data_source,
+      }));
 
-    if (insertError) {
-      console.error('[MockGen] Insert error:', insertError.message);
-    } else {
-      console.log(`[MockGen] ✓ Inserted ${batch.length} readings at ${now}`);
+      // Insert into database with automatic graceful column-not-found fallback
+      const insertedReadings = await insertReadingsBatch(batch);
+
+      console.log(`[MockGen] ✓ Ingested ${batch.length} readings at ${now} (${batch.filter(b => b.data_source === 'live').length} live, ${batch.filter(b => b.data_source === 'mock').length} mock)`);
       
       // Emit the readings to the SSE event bus
       if (insertedReadings && insertedReadings.length > 0) {
         insertedReadings.forEach((reading: any) => {
           // Attach sensor metadata for frontend convenience
-          const sensor = sensors.find((s) => s.id === reading.sensor_id);
+          const sensor = (sensors as Sensor[]).find((s) => s.id === reading.sensor_id);
           if (sensor) {
             realtimeBus.emit('reading', {
               ...reading,
+              data_source: reading.data_source ?? 'mock', // default to mock if column wasn't returned
               sensor: {
                 id: sensor.id,
                 name: sensor.name,
@@ -226,9 +230,12 @@ export async function startMockDataGenerator(intervalMs = 5_000): Promise<void> 
           }
         });
       }
+    } catch (err: any) {
+      console.error('[MockGen] Error in generation cycle:', err.message);
     }
   }, intervalMs);
 }
+
 
 /**
  * Stop the mock-data generator (useful for clean shutdown / tests).

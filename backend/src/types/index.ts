@@ -18,6 +18,7 @@ export interface Reading {
   sensor_id: string;
   value: number;
   recorded_at: string; // ISO 8601
+  data_source: 'live' | 'mock';
 }
 
 export interface RiskSnapshot {
@@ -37,3 +38,30 @@ export interface SensorSeed {
   lng: number;
   zone_name: string;
 }
+
+export type EventType = 'festival' | 'rally' | 'concert' | 'sports';
+
+export interface Event {
+  id: string;
+  name: string;
+  type: EventType;
+  zone_name: string;
+  lat: number;
+  lng: number;
+  start_time: string; // ISO 8601
+  end_time: string;   // ISO 8601
+  expected_footfall: number;
+  created_at: string;
+}
+
+export interface EventSeed {
+  name: string;
+  type: EventType;
+  zone_name: string;
+  lat: number;
+  lng: number;
+  start_time: string;
+  end_time: string;
+  expected_footfall: number;
+}
+

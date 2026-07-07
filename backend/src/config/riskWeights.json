@@ -2,5 +2,6 @@
   "rainfall": 0.30,
   "traffic": 0.20,
   "aqi": 0.15,
-  "water_level": 0.35
+  "water_level": 0.35,
+  "event": 0.20
 }

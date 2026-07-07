@@ -15,6 +15,7 @@ dotenv.config();
 
 import { supabase } from '../lib/supabase';
 import { SENSOR_SEEDS } from '../data/sensors';
+import { getEventSeeds } from '../data/events';
 
 async function seed(): Promise<void> {
   console.log('🌱  UrbanPulse seed script starting…');
@@ -34,35 +35,70 @@ async function seed(): Promise<void> {
   const force = process.argv.includes('--force') || process.argv.includes('-f');
 
   if (force) {
-    console.log('🗑️  Force flag detected. Clearing readings, risk_snapshots, and sensors tables...');
+    console.log('🗑️  Force flag detected. Clearing readings, risk_snapshots, events, and sensors tables...');
     await supabase.from('readings').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     await supabase.from('risk_snapshots').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     await supabase.from('sensors').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    try {
+      await supabase.from('events').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    } catch (e) {
+      console.log('⚠️  Failed to clear events table (might not exist yet).');
+    }
     console.log('✅  Tables cleared.');
   } else if (count && count > 0) {
-    console.log(`✅  Sensors table already has ${count} rows — skipping seed.`);
-    console.log('    Run `npm run seed -- --force` (or `npx ts-node src/scripts/seed.ts --force`) to clear and re-seed with new locations.');
-    process.exit(0);
+    console.log(`✅  Sensors table already has ${count} rows — checking events next.`);
   }
 
-  // ── Insert sensors ─────────────────────────────────────────────────────────
-  console.log(`📍  Inserting ${SENSOR_SEEDS.length} Mumbai sensors…`);
+  // ── Insert sensors (if forced or empty) ──────────────────────────────────
+  if (force || !count || count === 0) {
+    console.log(`📍  Inserting ${SENSOR_SEEDS.length} Mumbai sensors…`);
+    const { data: sensorData, error: insertError } = await supabase
+      .from('sensors')
+      .insert(SENSOR_SEEDS)
+      .select();
 
-  const { data, error: insertError } = await supabase
-    .from('sensors')
-    .insert(SENSOR_SEEDS)
-    .select();
+    if (insertError) {
+      console.error('❌  Sensor seed failed:', insertError.message);
+      process.exit(1);
+    }
 
-  if (insertError) {
-    console.error('❌  Seed failed:', insertError.message);
-    process.exit(1);
+    console.log(`\n✅  Successfully seeded ${sensorData?.length ?? 0} sensors:\n`);
+    sensorData?.forEach((s: { name: string; zone_name: string; type: string; id: string }) => {
+      console.log(`    [${s.zone_name.padEnd(12)}] ${s.type.padEnd(12)} → ${s.name}  (id: ${s.id})`);
+    });
   }
 
-  console.log(`\n✅  Successfully seeded ${data?.length ?? 0} sensors:\n`);
+  // ── Insert events ──────────────────────────────────────────────────────────
+  console.log('\n📍  Checking events table…');
+  try {
+    const { count: eventCount, error: eventCountError } = await supabase
+      .from('events')
+      .select('id', { count: 'exact', head: true });
 
-  data?.forEach((s: { name: string; zone_name: string; type: string; id: string }) => {
-    console.log(`    [${s.zone_name.padEnd(12)}] ${s.type.padEnd(12)} → ${s.name}  (id: ${s.id})`);
-  });
+    if (eventCountError) {
+      console.warn('⚠️  Could not query events table. Make sure migrations/002_event_schema.sql is applied.');
+    } else if (force || !eventCount || eventCount === 0) {
+      const eventSeeds = getEventSeeds();
+      console.log(`📍  Inserting ${eventSeeds.length} Mumbai events…`);
+      const { data: seededEvents, error: eventInsertError } = await supabase
+        .from('events')
+        .insert(eventSeeds)
+        .select();
+
+      if (eventInsertError) {
+        console.error('❌  Events seed failed:', eventInsertError.message);
+      } else {
+        console.log(`\n✅  Successfully seeded ${seededEvents?.length ?? 0} events:\n`);
+        seededEvents?.forEach((e: any) => {
+          console.log(`    [${e.zone_name.padEnd(12)}] ${e.type.padEnd(12)} → ${e.name} (${e.expected_footfall} expected footfall)`);
+        });
+      }
+    } else {
+      console.log(`✅  Events table already has ${eventCount} rows — skipping events seed.`);
+    }
+  } catch (err: any) {
+    console.warn('⚠️  Error seeding events table (it may not exist yet):', err.message);
+  }
 
   console.log('\n🚀  Seed complete. You can now run `npm run dev` to start the server.');
   process.exit(0);

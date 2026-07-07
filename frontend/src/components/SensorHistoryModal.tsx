@@ -15,6 +15,7 @@ interface Reading {
   id: string;
   value: number;
   recorded_at: string;
+  data_source?: 'live' | 'mock';
 }
 
 interface SensorHistoryModalProps {
@@ -85,6 +86,8 @@ export default function SensorHistoryModal({
   const themeText = isDarkMode ? 'text-white' : 'text-slate-800';
   const themeCard = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-slate-50 border-slate-200';
   const themeLabel = isDarkMode ? 'text-slate-400' : 'text-slate-500';
+
+  const latestReading = readings.length > 0 ? readings[readings.length - 1] : null;
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[2000] p-4">
@@ -219,31 +222,43 @@ export default function SensorHistoryModal({
 
         {/* Sensor details cards */}
         <div className="grid grid-cols-2 gap-3 text-xs">
-          <div className={`p-3 rounded-xl border ${themeCard}`}>
-            <span className={`text-[10px] font-bold block ${themeLabel}`}>Current Value</span>
-            <div className="text-base font-extrabold mt-1">
-              {readings.length > 0 
-                ? `${readings[readings.length - 1].value.toFixed(1)} ${getUnit(sensor.type)}`
-                : 'No reading'}
+          <div className={`p-3 rounded-xl border flex flex-col justify-between ${themeCard}`}>
+            <div>
+              <span className={`text-[10px] font-bold block ${themeLabel}`}>Current Value</span>
+              <div className="text-base font-extrabold mt-1">
+                {latestReading 
+                  ? `${latestReading.value.toFixed(1)} ${getUnit(sensor.type)}`
+                  : 'No reading'}
+              </div>
             </div>
+            {latestReading && (
+              <span className={`self-start mt-2 px-1.5 py-0.5 rounded text-[8px] font-mono font-bold uppercase ${
+                latestReading.data_source === 'live'
+                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                  : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+              }`}>
+                {latestReading.data_source ?? 'mock'} data
+              </span>
+            )}
           </div>
           <div className={`p-3 rounded-xl border ${themeCard}`}>
             <span className={`text-[10px] font-bold block ${themeLabel}`}>Current Severity</span>
             <div className="mt-1">
-              {readings.length > 0 ? (
+              {latestReading ? (
                 <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-mono font-bold ${
-                  getSeverity(sensor.type, readings[readings.length - 1].value) === 'red'
+                  getSeverity(sensor.type, latestReading.value) === 'red'
                     ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                    : getSeverity(sensor.type, readings[readings.length - 1].value) === 'yellow'
+                    : getSeverity(sensor.type, latestReading.value) === 'yellow'
                     ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
                     : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
                 }`}>
-                  {getSeverity(sensor.type, readings[readings.length - 1].value)}
+                  {getSeverity(sensor.type, latestReading.value)}
                 </span>
               ) : '—'}
             </div>
           </div>
         </div>
+
       </div>
     </div>
   );
