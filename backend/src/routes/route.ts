@@ -42,8 +42,8 @@ router.post('/', async (req: Request, res: Response) => {
   // ── Bbox pre-check (cheap, before the DB query) ───────────────────────────
   if (!isInsideBbox(from.lat, from.lng) || !isInsideBbox(to.lat, to.lng)) {
     return res.status(400).json({
-      error: 'One or both points are outside the Dadar–Kurla–Sion pilot routing area.',
-      bbox: { south: 18.99, west: 72.82, north: 19.10, east: 72.91 },
+      error: 'One or both points are outside the Greater Mumbai routing area.',
+      bbox: { south: 18.89, west: 72.77, north: 19.27, east: 72.99 },
     });
   }
 
@@ -111,7 +111,7 @@ router.get('/status', (_req: Request, res: Response) => {
     nodeCount: graph.nodeCount,
     edgeCount: graph.edgeCount,
     loadedAt: graph.loadedAt,
-    bbox: { south: 18.99, west: 72.82, north: 19.10, east: 72.91 },
+    bbox: { south: 18.89, west: 72.77, north: 19.27, east: 72.99 },
   });
 });
 

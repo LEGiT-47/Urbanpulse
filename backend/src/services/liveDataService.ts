@@ -38,6 +38,37 @@ let _aqiCache: CacheEntry<Map<string, number>> | null = null;
 const mockValuesState = new Map<string, number>();
 
 // ─────────────────────────────────────────────────────────────────────────────
+// TomTom Circuit Breaker
+// Trips on 401/403 to stop per-sensor log spam. Auto-resets after 30 minutes.
+// ─────────────────────────────────────────────────────────────────────────────
+const TOMTOM_CIRCUIT_RESET_MS = 30 * 60 * 1000; // 30 minutes
+let _tomtomCircuitOpenAt: number | null = null;  // null = closed (OK to query)
+let _tomtomCircuitReason: string = '';
+
+function tomtomCircuitIsOpen(): boolean {
+  if (_tomtomCircuitOpenAt === null) return false;
+  if (Date.now() - _tomtomCircuitOpenAt > TOMTOM_CIRCUIT_RESET_MS) {
+    console.log('[Live Traffic] Circuit breaker reset — retrying TomTom...');
+    _tomtomCircuitOpenAt = null;
+    return false;
+  }
+  return true;
+}
+
+function tripTomtomCircuit(reason: string): void {
+  if (_tomtomCircuitOpenAt !== null) return; // already open
+  _tomtomCircuitOpenAt = Date.now();
+  _tomtomCircuitReason = reason;
+  const hint = reason.includes('403')
+    ? 'Enable "Traffic Flow" product in your TomTom app at developer.tomtom.com'
+    : reason.includes('401')
+    ? 'Check TOMTOM_API_KEY is a valid UUID from developer.tomtom.com'
+    : reason;
+  console.warn(`[Live Traffic] ⚠ Circuit OPEN — ${reason}. All traffic will use mock data for 30 min.`);
+  console.warn(`[Live Traffic] 💡 Fix: ${hint}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CPCB Station Mapping Substrings
 // ─────────────────────────────────────────────────────────────────────────────
 const ZONE_TO_STATION_SUBSTRING: Record<string, string[]> = {
@@ -146,9 +177,14 @@ async function fetchLiveRainfall(sensors: Sensor[]): Promise<Map<string, number>
 
 async function fetchLiveTraffic(sensor: Sensor): Promise<number | null> {
   const apiKey = process.env.TOMTOM_API_KEY;
-  if (!apiKey) {
-    return null; // Fallback to mock
+  // TomTom keys are UUID-format (36 chars). If key is missing or clearly wrong key
+  // (e.g. a Resend key starting with "re_"), fall back to mock silently.
+  if (!apiKey || apiKey.startsWith('re_') || apiKey.length < 32) {
+    return null; // Fallback to mock — no log spam
   }
+
+  // Circuit breaker: if API previously returned 401/403, stop hammering it
+  if (tomtomCircuitIsOpen()) return null;
 
   // Check cache first
   const cached = _trafficCache.get(sensor.id);
@@ -161,6 +197,11 @@ async function fetchLiveTraffic(sensor: Sensor): Promise<number | null> {
     console.log(`[Live Traffic] Querying TomTom for sensor: ${sensor.name}...`);
     const resp = await fetch(url);
     if (!resp.ok) {
+      // Trip circuit breaker on auth errors — no point retrying every 5s
+      if (resp.status === 401 || resp.status === 403) {
+        tripTomtomCircuit(`HTTP ${resp.status}`);
+        return null;
+      }
       throw new Error(`TomTom HTTP error: ${resp.status}`);
     }
 

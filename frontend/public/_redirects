@@ -1,0 +1,4 @@
+# Netlify redirects file for UrbanPulse SPA & API Proxying
+
+# SPA routing fallback
+/*    /index.html   200

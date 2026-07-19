@@ -60,3 +60,15 @@ realtimeBus.on('weights', (weights) => {
 realtimeBus.on('simulation', (state) => {
   broadcastSSE('simulation', state);
 });
+
+realtimeBus.on('agent_stage', (stage) => {
+  broadcastSSE('agent_stage', stage);
+});
+
+realtimeBus.on('agent_cycle', (cycle) => {
+  broadcastSSE('agent_cycle', cycle);
+});
+
+realtimeBus.on('agent_reroute', (reroute) => {
+  broadcastSSE('agent_reroute', reroute);
+});

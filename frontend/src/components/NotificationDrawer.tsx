@@ -3,7 +3,7 @@ import { AlertTriangle, Clock, Flame, X } from 'lucide-react';
 export interface AlertNotification {
   id: string;
   timestamp: string;
-  type: 'critical' | 'predicted';
+  type: 'critical' | 'predicted' | 'sentinel';
   message: string;
   zoneName: string;
   score: number;

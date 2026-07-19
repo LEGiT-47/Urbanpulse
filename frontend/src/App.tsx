@@ -15,7 +15,9 @@ import {
   Flame,
   LayoutDashboard,
   Bell,
-  Sliders
+  Sliders,
+  Bot,
+  LogOut
 } from 'lucide-react';
 import { getSeverity, getUnit, getSensorLabel, getRiskCategory, getRiskColor, getRiskBgClass } from './utils/severity';
 import type { RiskCategory } from './utils/severity';
@@ -25,6 +27,9 @@ import NotificationDrawer from './components/NotificationDrawer';
 import type { AlertNotification } from './components/NotificationDrawer';
 import SimulationPanel from './components/SimulationPanel';
 import SensorHistoryModal from './components/SensorHistoryModal';
+import LoginPage from './pages/LoginPage';
+import type { AuthUser } from './pages/LoginPage';
+import AgentConsolePage from './pages/AgentConsolePage';
 
 // TypeScript interfaces
 interface Sensor {
@@ -299,11 +304,17 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   
+  // Auth state
+  const [user, setUser] = useState<AuthUser | null>(() => {
+    try { return JSON.parse(localStorage.getItem('up_user') || 'null'); } catch { return null; }
+  });
+
   // Dashboard states
-  const [activeTab, setActiveTab] = useState<'sensors' | 'risk' | 'routing'>(() => {
+  const [activeTab, setActiveTab] = useState<'sensors' | 'risk' | 'routing' | 'agent'>(() => {
     const saved = localStorage.getItem('up_active_tab');
     return (saved as any) || 'risk';
   });
+  const [currentAgentStage, setCurrentAgentStage] = useState<string>('idle');
   const [riskSnapshots, setRiskSnapshots] = useState<RiskSnapshot[]>([]);
   const [riskHistory, setRiskHistory] = useState<Record<string, number[]>>({});
   const [riskForecasts, setRiskForecasts] = useState<Record<string, ForecastResult>>({});
@@ -573,6 +584,28 @@ export default function App() {
           setWeights(data);
         } else if (type === 'simulation') {
           setIsSimulationPaused(data.paused);
+        } else if (type === 'agent_stage') {
+          setCurrentAgentStage(data.stage);
+        } else if (type === 'agent_cycle') {
+          // Push sentinel alert into the notification drawer
+          if (data.results && data.results.length > 0) {
+            const actionable = (data.results as any[]).filter((r: any) => r.llm_decision?.action_needed);
+            actionable.forEach((r: any) => {
+              setAlerts(prev => {
+                const exists = prev.some(a => a.zoneName === r.zone_name && a.type === 'sentinel' &&
+                  Date.now() - new Date(a.timestamp).getTime() < 120_000);
+                if (exists) return prev;
+                return [{
+                  id: `sentinel-${r.zone_name}-${Date.now()}`,
+                  timestamp: new Date().toISOString(),
+                  type: 'sentinel' as any,
+                  message: `🤖 Sentinel Agent: ${r.llm_decision?.explanation ?? 'Action triggered'} (${r.zone_name})`,
+                  zoneName: r.zone_name,
+                  score: r.risk_score,
+                }, ...prev].slice(0, 50);
+              });
+            });
+          }
         }
       } catch (err) {
         console.error('[SSE] Failed to parse event data:', err);
@@ -1217,6 +1250,12 @@ export default function App() {
     localStorage.setItem('up_active_tab', activeTab);
   }, [activeTab]);
 
+  // Save user to localStorage
+  useEffect(() => {
+    if (user) localStorage.setItem('up_user', JSON.stringify(user));
+    else localStorage.removeItem('up_user');
+  }, [user]);
+
   // Draw polyline when routeResult changes
   useEffect(() => {
     const map = mapRef.current;
@@ -1558,6 +1597,16 @@ export default function App() {
   const themeTabActive = isDarkMode ? 'bg-slate-800 text-white' : 'bg-slate-200 text-slate-900';
   const themeSidebar = isDarkMode ? 'bg-[#0c1220]/95' : 'bg-white/95 border-r';
 
+  // ── Auth gate: show login page if no user ────────────────────────────────
+  if (!user) {
+    return (
+      <LoginPage
+        isDarkMode={isDarkMode}
+        onLogin={(u) => setUser(u)}
+      />
+    );
+  }
+
   return (
     <div className={`h-screen w-screen flex flex-row overflow-hidden ${themeBg} transition-colors duration-300`}>
       
@@ -1583,6 +1632,10 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-2">
+            {/* User pill */}
+            <span className={`text-[9px] font-mono px-2 py-1 rounded border ${isDarkMode ? 'border-slate-700 text-slate-400' : 'border-slate-200 text-slate-500'}`}>
+              {user.role === 'operator' ? '⚡' : '👁'} {user.email.split('@')[0]}
+            </span>
             <button 
               onClick={() => setIsDarkMode(!isDarkMode)}
               title="Toggle theme"
@@ -1609,6 +1662,13 @@ export default function App() {
               className={`p-1.5 rounded-lg ${isDarkMode ? 'hover:bg-slate-800 text-gray-400 hover:text-white' : 'hover:bg-slate-100 text-slate-500 hover:text-slate-800'} transition-colors`}
             >
               <RefreshCw className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setUser(null)}
+              title="Sign out"
+              className={`p-1.5 rounded-lg ${isDarkMode ? 'hover:bg-slate-800 text-gray-400 hover:text-white' : 'hover:bg-slate-100 text-slate-500'} transition-colors`}
+            >
+              <LogOut className="w-4 h-4" />
             </button>
           </div>
         </header>
@@ -1648,6 +1708,29 @@ export default function App() {
             <ShieldAlert className="w-3.5 h-3.5" />
             Emergency Route
           </button>
+          {/* Agent Console — Operator only, with pulsing dot badge */}
+          {user.role === 'operator' && (
+            <button 
+              onClick={() => { setActiveTab('agent'); setIsRoutingMode(false); }}
+              className={`flex-1 relative flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-semibold border transition-all duration-200 ${
+                activeTab === 'agent' 
+                  ? 'bg-violet-600/30 text-violet-300 border-violet-500/40' 
+                  : `bg-transparent border-transparent ${themeTextMuted} hover:text-violet-300`
+              }`}
+            >
+              {/* Pulsing indicator dot */}
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${
+                  currentAgentStage !== 'idle' ? 'bg-violet-400' : 'bg-violet-600'
+                } opacity-75`} />
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                  currentAgentStage !== 'idle' ? 'bg-violet-400' : 'bg-violet-700'
+                }`} />
+              </span>
+              <Bot className="w-3.5 h-3.5" />
+              Sentinel
+            </button>
+          )}
         </div>
 
         {/* ── TAB A: RISK TWIN VIEW ── */}
@@ -1981,7 +2064,7 @@ export default function App() {
               }`}>
                 <span className={`w-2 h-2 rounded-full ${graphReady ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400 animate-ping'}`} />
                 {isDemoMode
-                  ? '✓ Demo graph ready (12 Dadar–Kurla–Sion junctions)'
+                  ? '✓ Demo graph ready (Greater Mumbai network)'
                   : graphReady
                     ? '✓ OSM road graph loaded — real road network active'
                     : '⏳ Loading road network from OpenStreetMap…'}
@@ -2281,10 +2364,41 @@ export default function App() {
 
           </div>
         )}
+
+        {/* ── TAB D: SENTINEL AGENT CONSOLE ── */}
+        {activeTab === 'agent' && (
+          <div className="flex-1 flex flex-col overflow-y-auto">
+            <div className={`p-5 border-b ${isDarkMode ? 'border-slate-800/40' : 'border-slate-200'}`}>
+              <div className="flex items-center gap-2 mb-1">
+                <Bot className="w-4 h-4 text-violet-400" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-violet-400">Sentinel Agent</h3>
+                <span className="relative flex h-2 w-2 ml-1">
+                  <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${
+                    currentAgentStage !== 'idle' ? 'bg-violet-400' : 'bg-violet-700'
+                  } opacity-75`} />
+                  <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                    currentAgentStage !== 'idle' ? 'bg-violet-400' : 'bg-violet-800'
+                  }`} />
+                </span>
+              </div>
+              <p className={`text-[11px] ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                Autonomous perceive → reason → act → learn loop. The full console is shown in the main panel.
+              </p>
+              <div className={`mt-3 px-3 py-2 rounded-lg text-[11px] font-mono border ${
+                currentAgentStage !== 'idle'
+                  ? 'bg-violet-500/10 border-violet-500/30 text-violet-300'
+                  : 'bg-slate-800/40 border-slate-700/50 text-slate-400'
+              }`}>
+                Stage: <span className="font-bold capitalize">{currentAgentStage}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
       </aside>
 
-      {/* 2. Map Viewport */}
-      <main className="flex-1 h-full w-full relative z-0">
+      {/* 2. Map Viewport (hidden when Agent Console is active) */}
+      <main className="flex-1 h-full w-full relative z-0" style={{ display: activeTab === 'agent' ? 'none' : undefined }}>
         <div ref={mapContainerRef} className="h-full w-full" />
 
         {/* Floating Side Drawer for Selected Zone details */}
@@ -2441,6 +2555,13 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* 3. Agent Console — full viewport panel (shown instead of map when agent tab active) */}
+      {activeTab === 'agent' && (
+        <div className={`flex-1 h-full overflow-hidden ${isDarkMode ? 'bg-[#0b0f19]' : 'bg-slate-50'}`}>
+          <AgentConsolePage isDarkMode={isDarkMode} />
+        </div>
+      )}
 
       {/* Real-time Alerts Drawer */}
       <NotificationDrawer

@@ -206,10 +206,10 @@ export function computeRoute(
 
   // Validate both points are within the pilot zone bbox
   if (!isInsideBbox(request.from.lat, request.from.lng)) {
-    return { error: 'Origin is outside the supported routing area (Dadar–Kurla–Sion pilot zone).', code: 400 };
+    return { error: 'Origin is outside the supported routing area (Greater Mumbai).', code: 400 };
   }
   if (!isInsideBbox(request.to.lat, request.to.lng)) {
-    return { error: 'Destination is outside the supported routing area (Dadar–Kurla–Sion pilot zone).', code: 400 };
+    return { error: 'Destination is outside the supported routing area (Greater Mumbai).', code: 400 };
   }
 
   // Snap to nearest graph nodes

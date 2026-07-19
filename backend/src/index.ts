@@ -10,6 +10,8 @@ import sensorRoutes from './routes/sensors';
 import riskRoutes from './routes/risk';
 import eventRoutes from './routes/events';
 import routeRoutes from './routes/route';
+import agentRoutes from './routes/agent';
+import { startSentinelAgent } from './agent/sentinel';
 import { startRoadGraphLoader } from './services/roadGraph';
 import { 
   startMockDataGenerator, 
@@ -154,6 +156,7 @@ app.use('/api/sensors', sensorRoutes);
 app.use('/api/risk', riskRoutes);
 app.use('/api/events', eventRoutes);
 app.use('/api/route', routeRoutes);
+app.use('/api/agent', agentRoutes);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 404 fallback
@@ -190,6 +193,9 @@ app.listen(PORT, async () => {
   // Start the road graph loader (fetches OSM data from Overpass API)
   // Non-blocking: retries every 30s if Overpass is temporarily unavailable
   startRoadGraphLoader();
+
+  // Start the Sentinel autonomous agent (perceive → reason → act → learn)
+  startSentinelAgent();
 });
 
 export default app;

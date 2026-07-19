@@ -1,7 +1,7 @@
 /**
  * roadGraph.ts
  * ─────────────────────────────────────────────────────────────────────────────
- * Fetches the road network for the Dadar–Kurla–Sion pilot zone from the
+ * Fetches the road network for Greater Mumbai from the
  * Overpass API and builds an in-memory adjacency graph.
  *
  * Graph structure:
@@ -49,12 +49,12 @@ export interface RoadGraph {
 // Pilot zone configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Bounding box: south, west, north, east — covers Dadar, Sion, Mahim, Kurla */
+/** Bounding box: south, west, north, east — covers Greater Mumbai */
 export const GRAPH_BBOX = {
-  south: 18.99,
-  west:  72.82,
-  north: 19.10,
-  east:  72.91,
+  south: 18.89,
+  west:  72.77,
+  north: 19.27,
+  east:  72.99,
 };
 
 /** Zone centres used for assigning edges to UrbanPulse monitoring zones */
@@ -66,6 +66,11 @@ const ZONE_CENTERS: Record<string, [number, number]> = {
   Bandra:    [19.0640, 72.8493],
   Kalbadevi: [18.9499, 72.8250],
   Chembur:   [19.0618, 72.8998],
+  Andheri:   [19.1136, 72.8697],
+  Vikhroli:  [19.1088, 72.9231],
+  Borivali:  [19.2307, 72.8567],
+  Colaba:    [18.9067, 72.8147],
+  Goregaon:  [19.1663, 72.8526],
 };
 
 /** Speed estimates (kph) keyed by OSM highway tag */
