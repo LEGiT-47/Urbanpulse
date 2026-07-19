@@ -97,11 +97,12 @@ export default function AgentConsolePage({ isDarkMode }: AgentConsolePanelProps)
   async function fetchHistory() {
     try {
       const res = await fetch('/api/agent/history?limit=50');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const ct = res.headers.get('content-type') || '';
+      if (!res.ok || !ct.includes('application/json')) return;
       const data = await res.json();
       setLog(data.entries || []);
     } catch (err) {
-      console.warn('[AgentConsole] Failed to fetch history:', err);
+      console.warn('[AgentConsole] History fetch paused while backend connects.');
     } finally {
       setIsLoading(false);
     }
@@ -120,31 +121,41 @@ export default function AgentConsolePage({ isDarkMode }: AgentConsolePanelProps)
     fetchHistory();
     resetCountdown();
 
-    // Subscribe to SSE for live agent updates
-    const source = new EventSource('/api/realtime/stream');
+    let source: EventSource | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    source.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
+    function connect() {
+      source = new EventSource('/api/realtime/stream');
 
-        if (msg.type === 'agent_stage') {
-          setCurrentStage(msg.data.stage as AgentStage);
-        }
-
-        if (msg.type === 'agent_cycle') {
-          const { cycleId, zonesEvaluated, zonesTotal, timestamp, results } = msg.data;
-          setCycleInfo({ cycleId, zonesEvaluated, zonesTotal, timestamp });
-          if (results && results.length > 0) {
-            setLog(prev => [...results, ...prev].slice(0, 100));
+      source.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'agent_stage') {
+            setCurrentStage(msg.data.stage as AgentStage);
           }
-          resetCountdown();
-          setTimeout(() => setCurrentStage('idle'), 500);
-        }
-      } catch (_) {}
-    };
+          if (msg.type === 'agent_cycle') {
+            const { cycleId, zonesEvaluated, zonesTotal, timestamp, results } = msg.data;
+            setCycleInfo({ cycleId, zonesEvaluated, zonesTotal, timestamp });
+            if (results && results.length > 0) {
+              setLog(prev => [...results, ...prev].slice(0, 100));
+            }
+            resetCountdown();
+            setTimeout(() => setCurrentStage('idle'), 500);
+          }
+        } catch (_) {}
+      };
+
+      source.onerror = () => {
+        if (source) source.close();
+        retryTimer = setTimeout(connect, 10000);
+      };
+    }
+
+    connect();
 
     return () => {
-      source.close();
+      if (source) source.close();
+      if (retryTimer) clearTimeout(retryTimer);
       if (tickRef.current) clearInterval(tickRef.current);
     };
   }, []);

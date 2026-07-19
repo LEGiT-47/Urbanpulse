@@ -384,22 +384,30 @@ export default function App() {
   const [tempLatB, setTempLatB] = useState('');
   const [tempLngB, setTempLngB] = useState('');
 
-  // 1. Fetch sensors and metadata on mount
+  // 1. Fetch sensors and metadata on mount (ONLY when user is logged in)
   useEffect(() => {
+    if (!user) return;
+
     async function fetchSensors() {
       try {
         const res = await fetch('/api/sensors');
-        if (!res.ok) throw new Error('Failed to fetch sensors');
+        const ct = res.headers.get('content-type') || '';
+        if (!res.ok || !ct.includes('application/json')) {
+          setError('⚡ Waking up UrbanPulse Cloud API... Please wait 20 seconds.');
+          setLoading(false);
+          return;
+        }
         const data = await res.json();
         setSensors(data.sensors || []);
+        setError(null);
         
         await fetchEvents();
         await fetchLatestReadings(data.sensors || []);
         await fetchRiskData();
         await fetchInitialMeta();
       } catch (err: any) {
-        console.error('Error fetching sensors:', err);
-        setError('Could not connect to the UrbanPulse API. Make sure the backend server is running on port 3001.');
+        console.warn('Backend waking up or connecting...', err.message);
+        setError('Connecting to UrbanPulse Cloud API...');
       } finally {
         setLoading(false);
       }
@@ -408,34 +416,33 @@ export default function App() {
     async function fetchEvents() {
       try {
         const res = await fetch('/api/events');
-        if (res.ok) {
+        const ct = res.headers.get('content-type') || '';
+        if (res.ok && ct.includes('application/json')) {
           const data = await res.json();
           setEvents(data.events || []);
         }
-      } catch (e) {
-        console.error('Failed to fetch events:', e);
-      }
+      } catch (e) {}
     }
 
     async function fetchInitialMeta() {
       try {
         const resSim = await fetch('/api/simulation/status');
-        if (resSim.ok) {
+        const ctSim = resSim.headers.get('content-type') || '';
+        if (resSim.ok && ctSim.includes('application/json')) {
           const data = await resSim.json();
           setIsSimulationPaused(data.paused);
         }
         const resWeights = await fetch('/api/risk/weights');
-        if (resWeights.ok) {
+        const ctW = resWeights.headers.get('content-type') || '';
+        if (resWeights.ok && ctW.includes('application/json')) {
           const data = await resWeights.json();
           setWeights(data);
         }
-      } catch (e) {
-        console.error('Failed to fetch initial metadata:', e);
-      }
+      } catch (e) {}
     }
 
     fetchSensors();
-  }, []);
+  }, [user]);
 
   // 2. Fetch Latest readings
   const fetchLatestReadings = async (currentSensors: Sensor[]) => {
@@ -462,11 +469,12 @@ export default function App() {
 
   // 3. Fetch Risk snapshots, history & forecasts
   const fetchRiskData = async () => {
-    if (isDemoMode) return;
+    if (isDemoMode || !user) return;
     try {
       // Fetch current snapshots
       const resCurrent = await fetch('/api/risk/current');
-      if (resCurrent.ok) {
+      const ctCurr = resCurrent.headers.get('content-type') || '';
+      if (resCurrent.ok && ctCurr.includes('application/json')) {
         const data = await resCurrent.json();
         setRiskSnapshots(data.snapshots || []);
         
@@ -476,7 +484,8 @@ export default function App() {
           Object.keys(ZONE_CENTERS).map(async (zone) => {
             try {
               const resHistory = await fetch(`/api/risk/history?zone=${zone}&hours=1`);
-              if (resHistory.ok) {
+              const ctHist = resHistory.headers.get('content-type') || '';
+              if (resHistory.ok && ctHist.includes('application/json')) {
                 const historyRes = await resHistory.json();
                 historyData[zone] = (historyRes.history || []).map((h: any) => h.score);
               }
@@ -491,137 +500,99 @@ export default function App() {
 
   // 3c. Set up Server-Sent Events (SSE) listener for real-time updates
   useEffect(() => {
-    if (isDemoMode) return;
+    if (isDemoMode || !user) return;
 
-    console.log('[SSE] Connecting to realtime stream...');
-    const eventSource = new EventSource('/api/realtime/stream');
+    let eventSource: EventSource | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    eventSource.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        const { type, data } = message;
+    function connectSSE() {
+      eventSource = new EventSource('/api/realtime/stream');
 
-        if (type === 'reading') {
-          // Update live readings map
-          setReadings((prev) => ({
-            ...prev,
-            [data.sensor_id]: data,
-          }));
-        } else if (type === 'snapshots') {
-          // Update current snapshots
-          setRiskSnapshots(data || []);
+      eventSource.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          const { type, data } = message;
 
-          // Check if any zone crosses 75 (Critical) and push alerts
-          (data || []).forEach((snapshot: RiskSnapshot) => {
-            if (snapshot.score >= 75) {
-              setAlerts((prev) => {
-                // Prevent duplicate alert within 2 minutes for same zone
-                const exists = prev.some(
-                  (a) => a.zoneName === snapshot.zone_name && 
-                         a.type === 'critical' && 
-                         Date.now() - new Date(a.timestamp).getTime() < 120_000
-                );
-                if (exists) return prev;
-
-                const newAlert: AlertNotification = {
-                  id: `alert-${snapshot.zone_name}-crit-${Date.now()}`,
-                  timestamp: new Date().toISOString(),
-                  type: 'critical',
-                  message: `CRITICAL risk level detected in ${snapshot.zone_name} (Score: ${snapshot.score}).`,
-                  zoneName: snapshot.zone_name,
-                  score: snapshot.score,
-                };
-                return [newAlert, ...prev].slice(0, 50); // limit to 50 alerts
+          if (type === 'reading') {
+            setReadings((prev) => ({ ...prev, [data.sensor_id]: data }));
+          } else if (type === 'snapshots') {
+            setRiskSnapshots(data || []);
+            (data || []).forEach((snapshot: RiskSnapshot) => {
+              if (snapshot.score >= 75) {
+                setAlerts((prev) => {
+                  const exists = prev.some(
+                    (a) => a.zoneName === snapshot.zone_name && 
+                           a.type === 'critical' && 
+                           Date.now() - new Date(a.timestamp).getTime() < 120_000
+                  );
+                  if (exists) return prev;
+                  const newAlert: AlertNotification = {
+                    id: `alert-${snapshot.zone_name}-crit-${Date.now()}`,
+                    timestamp: new Date().toISOString(),
+                    type: 'critical',
+                    message: `CRITICAL risk level detected in ${snapshot.zone_name} (Score: ${snapshot.score}).`,
+                    zoneName: snapshot.zone_name,
+                    score: snapshot.score,
+                  };
+                  return [newAlert, ...prev].slice(0, 50);
+                });
+              }
+            });
+            setRiskHistory((prev) => {
+              const updated = { ...prev };
+              (data || []).forEach((snapshot: RiskSnapshot) => {
+                const currentHistory = updated[snapshot.zone_name] || [];
+                const nextHistory = [...currentHistory, snapshot.score];
+                if (nextHistory.length > 12) nextHistory.shift();
+                updated[snapshot.zone_name] = nextHistory;
+              });
+              return updated;
+            });
+          } else if (type === 'forecast') {
+            setRiskForecasts((prev) => ({ ...prev, [data.zone]: data }));
+          } else if (type === 'weights') {
+            setWeights(data);
+          } else if (type === 'simulation') {
+            setIsSimulationPaused(data.paused);
+          } else if (type === 'agent_stage') {
+            setCurrentAgentStage(data.stage);
+          } else if (type === 'agent_cycle') {
+            if (data.results && data.results.length > 0) {
+              const actionable = (data.results as any[]).filter((r: any) => r.llm_decision?.action_needed);
+              actionable.forEach((r: any) => {
+                setAlerts(prev => {
+                  const exists = prev.some(a => a.zoneName === r.zone_name && a.type === 'sentinel' &&
+                    Date.now() - new Date(a.timestamp).getTime() < 120_000);
+                  if (exists) return prev;
+                  return [{
+                    id: `sentinel-${r.zone_name}-${Date.now()}`,
+                    timestamp: new Date().toISOString(),
+                    type: 'sentinel' as any,
+                    message: `🤖 Sentinel Agent: ${r.llm_decision?.explanation ?? 'Action triggered'} (${r.zone_name})`,
+                    zoneName: r.zone_name,
+                    score: r.risk_score,
+                  }, ...prev].slice(0, 50);
+                });
               });
             }
-          });
-
-          // Update risk history map with new snapshot scores
-          setRiskHistory((prev) => {
-            const updated = { ...prev };
-            (data || []).forEach((snapshot: RiskSnapshot) => {
-              const currentHistory = updated[snapshot.zone_name] || [];
-              const nextHistory = [...currentHistory, snapshot.score];
-              if (nextHistory.length > 12) nextHistory.shift();
-              updated[snapshot.zone_name] = nextHistory;
-            });
-            return updated;
-          });
-        } else if (type === 'forecast') {
-          // Update forecast details
-          setRiskForecasts((prev) => ({
-            ...prev,
-            [data.zone]: data,
-          }));
-
-          // Check if forecast projects crossing 75 at any horizon
-          const projectsCritical = data.predicted.some((val: number) => val >= 75);
-          if (projectsCritical) {
-            setAlerts((prev) => {
-              // Prevent duplicate alert within 2 minutes
-              const exists = prev.some(
-                (a) => a.zoneName === data.zone && 
-                       a.type === 'predicted' && 
-                       Date.now() - new Date(a.timestamp).getTime() < 120_000
-              );
-              if (exists) return prev;
-
-              const minHorizonIndex = data.predicted.findIndex((val: number) => val >= 75);
-              const minHorizon = data.horizon_minutes[minHorizonIndex];
-
-              const newAlert: AlertNotification = {
-                id: `alert-${data.zone}-pred-${Date.now()}`,
-                timestamp: new Date().toISOString(),
-                type: 'predicted',
-                message: `Forecast projects CRITICAL risk (${data.predicted[minHorizonIndex]}) in ${data.zone} in ${minHorizon} min.`,
-                zoneName: data.zone,
-                score: data.predicted[minHorizonIndex],
-              };
-              return [newAlert, ...prev].slice(0, 50);
-            });
           }
-        } else if (type === 'weights') {
-          setWeights(data);
-        } else if (type === 'simulation') {
-          setIsSimulationPaused(data.paused);
-        } else if (type === 'agent_stage') {
-          setCurrentAgentStage(data.stage);
-        } else if (type === 'agent_cycle') {
-          // Push sentinel alert into the notification drawer
-          if (data.results && data.results.length > 0) {
-            const actionable = (data.results as any[]).filter((r: any) => r.llm_decision?.action_needed);
-            actionable.forEach((r: any) => {
-              setAlerts(prev => {
-                const exists = prev.some(a => a.zoneName === r.zone_name && a.type === 'sentinel' &&
-                  Date.now() - new Date(a.timestamp).getTime() < 120_000);
-                if (exists) return prev;
-                return [{
-                  id: `sentinel-${r.zone_name}-${Date.now()}`,
-                  timestamp: new Date().toISOString(),
-                  type: 'sentinel' as any,
-                  message: `🤖 Sentinel Agent: ${r.llm_decision?.explanation ?? 'Action triggered'} (${r.zone_name})`,
-                  zoneName: r.zone_name,
-                  score: r.risk_score,
-                }, ...prev].slice(0, 50);
-              });
-            });
-          }
-        }
-      } catch (err) {
-        console.error('[SSE] Failed to parse event data:', err);
-      }
-    };
+        } catch (err) {}
+      };
 
-    eventSource.onerror = (err) => {
-      console.error('[SSE] EventSource failed:', err);
-      eventSource.close();
-    };
+      eventSource.onerror = () => {
+        if (eventSource) eventSource.close();
+        // Silent retry after 10 seconds if backend is waking up
+        retryTimer = setTimeout(connectSSE, 10000);
+      };
+    }
+
+    connectSSE();
 
     return () => {
-      console.log('[SSE] Closing realtime stream...');
-      eventSource.close();
+      if (eventSource) eventSource.close();
+      if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [isDemoMode]);
+  }, [isDemoMode, user]);
 
   // 4. Polling updates (Only runs in Demo Mode for client-side local loops)
   useEffect(() => {
