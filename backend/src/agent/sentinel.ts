@@ -444,15 +444,15 @@ async function runCycle(): Promise<void> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function startSentinelAgent(): void {
-  console.log('[Sentinel] 🤖 Sentinel Agent starting — runs every 60 seconds');
+  console.log('[Sentinel] 🤖 Sentinel Agent starting — runs every 10 minutes');
 
   // Run once immediately after a short delay (let the risk engine populate data first)
   setTimeout(() => {
     runCycle().catch(err => console.error('[Sentinel] Initial cycle error:', err));
   }, 30_000);
 
-  // Then schedule every 60 seconds
-  cron.schedule('*/1 * * * *', () => {
+  // Then schedule every 10 minutes
+  cron.schedule('*/10 * * * *', () => {
     runCycle().catch(err => console.error('[Sentinel] Cron cycle error:', err));
   });
 }

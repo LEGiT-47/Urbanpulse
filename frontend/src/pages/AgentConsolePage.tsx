@@ -111,11 +111,17 @@ export default function AgentConsolePage({ isDarkMode }: AgentConsolePanelProps)
 
   // ── Countdown ticker ─────────────────────────────────────────────────────
   function resetCountdown() {
-    setNextCycleIn(60);
+    setNextCycleIn(600); // 10 minutes
     if (tickRef.current) clearInterval(tickRef.current);
     tickRef.current = setInterval(() => {
       setNextCycleIn(prev => Math.max(0, prev - 1));
     }, 1000);
+  }
+
+  function formatTime(seconds: number): string {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}m ${secs < 10 ? '0' : ''}${secs}s`;
   }
 
   useEffect(() => {
@@ -194,7 +200,7 @@ export default function AgentConsolePage({ isDarkMode }: AgentConsolePanelProps)
                 Sentinel Agent Console
                 <span className="ml-2 text-[10px] font-mono px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400 border border-violet-500/20">AUTONOMOUS</span>
               </h2>
-              <p className={`text-xs mt-0.5 ${themeMuted}`}>Perceive → Reason → Act → Learn · runs every 60 seconds</p>
+              <p className={`text-xs mt-0.5 ${themeMuted}`}>Perceive → Reason → Act → Learn · runs every 10 minutes</p>
             </div>
           </div>
         </div>
@@ -213,7 +219,7 @@ export default function AgentConsolePage({ isDarkMode }: AgentConsolePanelProps)
           <h3 className={`text-xs font-bold uppercase tracking-widest ${themeMuted}`}>Agent Loop — Live Stage</h3>
           <div className={`flex items-center gap-1.5 text-[10px] font-mono ${themeMuted}`}>
             <Clock className="w-3 h-3" />
-            Next cycle in <span className="text-violet-400 font-bold">{nextCycleIn}s</span>
+            Next cycle in <span className="text-violet-400 font-bold">{formatTime(nextCycleIn)}</span>
           </div>
         </div>
 
@@ -299,7 +305,7 @@ export default function AgentConsolePage({ isDarkMode }: AgentConsolePanelProps)
             <p className={`text-xs mt-1 ${themeMuted}`}>The agent runs every 60s. Make sure the backend is running and <code>agent_log</code> table exists.</p>
           </div>
         ) : (
-          <div className="divide-y divide-slate-800/50">
+          <div className="divide-y divide-slate-800/50 max-h-[480px] overflow-y-auto custom-scrollbar">
             {log.map(entry => {
               const expanded = expandedRows.has(entry.id);
               return (
@@ -365,7 +371,7 @@ export default function AgentConsolePage({ isDarkMode }: AgentConsolePanelProps)
       {/* ── Info footer ── */}
       <div className={`rounded-xl border px-4 py-3 ${isDarkMode ? 'bg-violet-500/5 border-violet-500/20' : 'bg-violet-50 border-violet-200'}`}>
         <p className={`text-[10px] leading-relaxed ${isDarkMode ? 'text-violet-300/70' : 'text-violet-600'}`}>
-          <strong>How it works:</strong> Every 60 seconds the Sentinel Agent queries live risk snapshots (Perceive), sends High/Critical zones to the Groq LLM for convergence analysis (Reason), dispatches email alerts via Resend and computes emergency routes (Act), then logs every decision to the <code>agent_log</code> Supabase table (Learn). Actions are tagged <strong>🤖 Sentinel Agent</strong> to distinguish them from operator-triggered events.
+          <strong>How it works:</strong> Every 10 minutes the Sentinel Agent queries live risk snapshots (Perceive), sends High/Critical zones to the Groq LLM for convergence analysis (Reason), dispatches email alerts via Resend and computes emergency routes (Act), then logs every decision to the <code>agent_log</code> Supabase table (Learn). Actions are tagged <strong>🤖 Sentinel Agent</strong> to distinguish them from operator-triggered events.
         </p>
       </div>
     </div>
