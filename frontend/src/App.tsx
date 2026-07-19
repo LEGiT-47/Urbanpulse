@@ -30,6 +30,7 @@ import SensorHistoryModal from './components/SensorHistoryModal';
 import LoginPage from './pages/LoginPage';
 import type { AuthUser } from './pages/LoginPage';
 import AgentConsolePage from './pages/AgentConsolePage';
+import { getApiUrl } from './config';
 
 // TypeScript interfaces
 interface Sensor {
@@ -390,7 +391,7 @@ export default function App() {
 
     async function fetchSensors() {
       try {
-        const res = await fetch('/api/sensors');
+        const res = await fetch(getApiUrl('/api/sensors'));
         const ct = res.headers.get('content-type') || '';
         if (!res.ok || !ct.includes('application/json')) {
           setError('⚡ Waking up UrbanPulse Cloud API... Please wait 20 seconds.');
@@ -415,7 +416,7 @@ export default function App() {
 
     async function fetchEvents() {
       try {
-        const res = await fetch('/api/events');
+        const res = await fetch(getApiUrl('/api/events'));
         const ct = res.headers.get('content-type') || '';
         if (res.ok && ct.includes('application/json')) {
           const data = await res.json();
@@ -426,13 +427,13 @@ export default function App() {
 
     async function fetchInitialMeta() {
       try {
-        const resSim = await fetch('/api/simulation/status');
+        const resSim = await fetch(getApiUrl('/api/simulation/status'));
         const ctSim = resSim.headers.get('content-type') || '';
         if (resSim.ok && ctSim.includes('application/json')) {
           const data = await resSim.json();
           setIsSimulationPaused(data.paused);
         }
-        const resWeights = await fetch('/api/risk/weights');
+        const resWeights = await fetch(getApiUrl('/api/risk/weights'));
         const ctW = resWeights.headers.get('content-type') || '';
         if (resWeights.ok && ctW.includes('application/json')) {
           const data = await resWeights.json();
@@ -455,7 +456,7 @@ export default function App() {
       await Promise.all(
         currentSensors.map(async (sensor) => {
           try {
-            const res = await fetch(`/api/sensors/${sensor.id}/readings/latest`);
+            const res = await fetch(getApiUrl(`/api/sensors/${sensor.id}/readings/latest`));
             if (res.ok) {
               const data = await res.json();
               if (data.reading) updatedReadings[sensor.id] = data.reading;
@@ -472,7 +473,7 @@ export default function App() {
     if (isDemoMode || !user) return;
     try {
       // Fetch current snapshots
-      const resCurrent = await fetch('/api/risk/current');
+      const resCurrent = await fetch(getApiUrl('/api/risk/current'));
       const ctCurr = resCurrent.headers.get('content-type') || '';
       if (resCurrent.ok && ctCurr.includes('application/json')) {
         const data = await resCurrent.json();
@@ -483,7 +484,7 @@ export default function App() {
         await Promise.all(
           Object.keys(ZONE_CENTERS).map(async (zone) => {
             try {
-              const resHistory = await fetch(`/api/risk/history?zone=${zone}&hours=1`);
+              const resHistory = await fetch(getApiUrl(`/api/risk/history?zone=${zone}&hours=1`));
               const ctHist = resHistory.headers.get('content-type') || '';
               if (resHistory.ok && ctHist.includes('application/json')) {
                 const historyRes = await resHistory.json();
@@ -506,7 +507,7 @@ export default function App() {
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     function connectSSE() {
-      eventSource = new EventSource('/api/realtime/stream');
+      eventSource = new EventSource(getApiUrl('/api/realtime/stream'));
 
       eventSource.onmessage = (event) => {
         try {
@@ -1155,7 +1156,7 @@ export default function App() {
         drawRoutePolyline(coords);
       } else {
         // Live API call
-        const resp = await fetch('/api/route', {
+        const resp = await fetch(getApiUrl('/api/route'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ from: { lat: from[0], lng: from[1] }, to: { lat: to[0], lng: to[1] } }),
@@ -1178,17 +1179,18 @@ export default function App() {
 
   // Poll graph readiness in live mode
   useEffect(() => {
-    if (isDemoMode) { setGraphReady(true); return; }
+    if (isDemoMode || !user) { setGraphReady(true); return; }
     const check = async () => {
       try {
-        const r = await fetch('/api/route/status');
-        if (r.ok) { const d = await r.json(); setGraphReady(d.ready); }
+        const r = await fetch(getApiUrl('/api/route/status'));
+        const ct = r.headers.get('content-type') || '';
+        if (r.ok && ct.includes('application/json')) { const d = await r.json(); setGraphReady(d.ready); }
       } catch { /* silent */ }
     };
     check();
     const id = setInterval(check, 5000);
     return () => clearInterval(id);
-  }, [isDemoMode]);
+  }, [isDemoMode, user]);
 
   // Save routeFrom to localStorage and sync inputs
   useEffect(() => {

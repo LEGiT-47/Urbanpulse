@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { Bot, Eye, Brain, Zap, BookOpen, RefreshCw, Mail, Navigation, AlertTriangle, CheckCircle2, Clock, ChevronDown, ChevronUp } from 'lucide-react';
+import { getApiUrl } from '../config';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -96,7 +97,7 @@ export default function AgentConsolePage({ isDarkMode }: AgentConsolePanelProps)
   // ── Fetch initial log ────────────────────────────────────────────────────
   async function fetchHistory() {
     try {
-      const res = await fetch('/api/agent/history?limit=50');
+      const res = await fetch(getApiUrl('/api/agent/history?limit=50'));
       const ct = res.headers.get('content-type') || '';
       if (!res.ok || !ct.includes('application/json')) return;
       const data = await res.json();
@@ -125,7 +126,7 @@ export default function AgentConsolePage({ isDarkMode }: AgentConsolePanelProps)
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     function connect() {
-      source = new EventSource('/api/realtime/stream');
+      source = new EventSource(getApiUrl('/api/realtime/stream'));
 
       source.onmessage = (event) => {
         try {
