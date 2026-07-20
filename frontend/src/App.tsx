@@ -1326,13 +1326,37 @@ export default function App() {
       routePinToRef.current = L.marker(toCoords, { icon }).addTo(map);
     }
 
+    // Force Leaflet to recalculate container dimensions after CSS layout settles
+    const timer1 = setTimeout(() => map.invalidateSize(), 150);
+    const timer2 = setTimeout(() => map.invalidateSize(), 500);
+    const timer3 = setTimeout(() => map.invalidateSize(), 1000);
+
+    const handleResize = () => {
+      if (mapRef.current) mapRef.current.invalidateSize();
+    };
+    window.addEventListener('resize', handleResize);
+
     return () => {
+      clearTimeout(timer1);
+      clearTimeout(timer2);
+      clearTimeout(timer3);
+      window.removeEventListener('resize', handleResize);
       if (mapRef.current) {
         mapRef.current.remove();
         mapRef.current = null;
       }
     };
   }, []);
+
+  // Invalidate map size whenever user logs in or switches tabs to risk view
+  useEffect(() => {
+    if (mapRef.current && (activeTab === 'risk' || activeTab === 'routing')) {
+      const timer = setTimeout(() => {
+        mapRef.current?.invalidateSize();
+      }, 200);
+      return () => clearTimeout(timer);
+    }
+  }, [activeTab, user]);
 
   // 8. Dark/Light tiles filter trigger
   useEffect(() => {
